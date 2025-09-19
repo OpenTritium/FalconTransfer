@@ -1,10 +1,12 @@
-use std::mem::forget;
+use std::{mem::forget, time::Duration};
+
+use tokio::time::sleep;
 
 #[tokio::main]
 async fn main() {
-    let (discovery_srv, mut dns_recv) = discovery::DiscoveryService::run();
-    forget(discovery_srv);
-    while let Some(x) = dns_recv.recv().await {
-        println!("{:?}", x);
+    let x = discovery::DiscoveryService::run();
+    loop {
+        sleep(Duration::from_secs(3)).await;
+        println!("{:?}", x.neighbors());
     }
 }

@@ -42,8 +42,8 @@ impl Server {
             .unwrap_or(timestamp_based_str());
         let instance_name = sanitize_hostname_to_instancename(&hostname);
         let daemon = ServiceDaemon::new().expect("failed to create daemon");
-        daemon.set_multicast_loop_v4(false).expect("failed to disable multicast loop v4");
-        daemon.set_multicast_loop_v6(false).expect("failed to disable multicast v6");
+        // daemon.set_multicast_loop_v4(false).expect("failed to disable multicast loop v4");
+        // daemon.set_multicast_loop_v6(false).expect("failed to disable multicast v6");
         Self { instance_name, daemon }
     }
 
