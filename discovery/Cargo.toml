@@ -1,0 +1,12 @@
+[package]
+name = "discovery"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+futures-util = "0.3.31"
+hostname = "0.4.1"
+mdns-sd = "0.15.1"
+network-interface = "2.0.3"
+tokio = { workspace = true }
+tokio-util = { version = "0.7.16", features = ["time"] }

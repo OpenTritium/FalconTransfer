@@ -1,0 +1,6 @@
+[workspace]
+members = ["discovery", "identity"]
+resolver = "2"
+
+[workspace.dependencies]
+tokio = { version = "1.47.1", features = ["full"] }
