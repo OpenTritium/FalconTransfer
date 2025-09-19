@@ -10,7 +10,6 @@ use tokio::sync::mpsc;
 
 const SERVICE_TYPE: &str = &FULLNAME_SUFFIX[1..];
 const FULLNAME_SUFFIX: &str = "._falcon_transfer._udp.local.";
-const SERVER_PORT: u16 = 7878;
 const ALPN_ID: &str = "falcon-transfer-v1";
 
 pub struct DiscoveryService {

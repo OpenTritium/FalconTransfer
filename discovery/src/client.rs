@@ -65,11 +65,8 @@ impl DebouncedClient {
         let (tx, rx) = mpsc::channel(8);
         let abort = spawn(async move {
             let daemon = ServiceDaemon::new().unwrap();
-            #[cfg(windows)]
-            {
-                daemon.set_multicast_loop_v4(false).expect("failed to disable multicast loop v4");
-                daemon.set_multicast_loop_v6(false).expect("failed to disable multicast v6");
-            }
+            daemon.set_multicast_loop_v4(false).expect("failed to disable multicast loop v4");
+            daemon.set_multicast_loop_v6(false).expect("failed to disable multicast v6");
             let srv_rx = daemon.browse(SERVICE_TYPE).unwrap();
             let mut cache = ResolvedCache::new();
             loop {

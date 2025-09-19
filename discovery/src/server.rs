@@ -1,4 +1,4 @@
-use crate::{ALPN_ID, FULLNAME_SUFFIX, SERVER_PORT, SERVICE_TYPE, iface::collect_non_loopback};
+use crate::{ALPN_ID, FULLNAME_SUFFIX, SERVICE_TYPE, iface::collect_non_loopback};
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -42,11 +42,8 @@ impl Server {
             .unwrap_or(timestamp_based_str());
         let instance_name = sanitize_hostname_to_instancename(&hostname);
         let daemon = ServiceDaemon::new().expect("failed to create daemon");
-        #[cfg(unix)]
-        {
-            daemon.set_multicast_loop_v4(false).expect("failed to disable multicast loop v4");
-            daemon.set_multicast_loop_v6(false).expect("failed to disable multicast v6");
-        }
+        daemon.set_multicast_loop_v4(false).expect("failed to disable multicast loop v4");
+        daemon.set_multicast_loop_v6(false).expect("failed to disable multicast v6");
         Self { instance_name, daemon }
     }
 
@@ -59,7 +56,7 @@ impl Server {
             &self.instance_name,
             dns_hostname.as_ref(),
             addrs.as_slice(),
-            SERVER_PORT,
+            0,
             porp.as_slice(),
         )?;
         self.daemon.register(srv_info)?;
