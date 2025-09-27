@@ -1,13 +1,11 @@
-use std::sync::LazyLock;
-
 use http::{
     HeaderMap, HeaderName,
     header::{ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE},
 };
 use percent_encoding::percent_decode_str;
 use regex::Regex;
+use std::sync::LazyLock;
 use thiserror::Error;
-use url::Url;
 
 use crate::http::file_range::FileRange;
 

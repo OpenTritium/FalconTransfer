@@ -1,4 +1,10 @@
+mod command;
 mod composer;
+mod controller;
 mod file_range;
 mod header_map_ext;
+mod meta;
+mod qos;
+mod status;
 mod task;
+mod worker;

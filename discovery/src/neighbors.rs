@@ -4,7 +4,6 @@ use mdns_sd::ScopedIp;
 use std::{
     fmt,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    ops::Deref,
 };
 
 type ScopeId = u32;

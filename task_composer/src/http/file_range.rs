@@ -23,11 +23,11 @@ impl IntoRangeHeader for FileRange {
 
 pub struct Window<'a> {
     max: usize,
-    inner: &'a mut FileMultiRnage,
+    inner: &'a mut FileMultiRange,
 }
 
 impl<'a> Iterator for Window<'a> {
-    type Item = FileMultiRnage;
+    type Item = FileMultiRange;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.inner.is_empty() {
@@ -40,10 +40,10 @@ impl<'a> Iterator for Window<'a> {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct FileMultiRnage(RangeSetBlaze<usize>);
+pub struct FileMultiRange(RangeSetBlaze<usize>);
 
-impl FileMultiRnage {
-    pub fn split_at(&self, block_size: usize) -> (FileMultiRnage, FileMultiRnage) {
+impl FileMultiRange {
+    pub fn split_at(&self, block_size: usize) -> (FileMultiRange, FileMultiRange) {
         let mut head_set = RangeSetBlaze::new();
         let mut tail_set = RangeSetBlaze::new();
         let mut acc_len: usize = 0;
@@ -88,27 +88,28 @@ impl FileMultiRnage {
     }
 }
 
-impl BitOrAssign for FileMultiRnage {
+impl BitOrAssign for FileMultiRange {
     fn bitor_assign(&mut self, rhs: Self) { self.0 = (self.as_ref() | rhs.as_ref()).into() }
 }
 
-impl SubAssign for FileMultiRnage {
+impl SubAssign for FileMultiRange {
     fn sub_assign(&mut self, rhs: Self) { self.0 = (self.as_ref() - rhs.as_ref()).into() }
 }
 
-impl BitOr for &FileMultiRnage {
-    type Output = FileMultiRnage;
+impl BitOr for &FileMultiRange {
+    type Output = FileMultiRange;
 
     fn bitor(self, rhs: Self) -> Self::Output { (self.as_ref() | rhs.as_ref()).into() }
 }
 
-impl Sub for &FileMultiRnage {
-    type Output = FileMultiRnage;
+impl Sub for &FileMultiRange {
+    type Output = FileMultiRange;
 
     fn sub(self, rhs: Self) -> Self::Output { (self.as_ref() - rhs.as_ref()).into() }
 }
 
-impl IntoRangeHeader for FileMultiRnage {
+impl IntoRangeHeader for FileMultiRange {
+    /// 如果这是一个空返回则返回 None，不会返回空字符串
     fn into_header_value(&self) -> Option<String> {
         if self.0.is_empty() {
             return None;
@@ -118,24 +119,24 @@ impl IntoRangeHeader for FileMultiRnage {
     }
 }
 
-impl Deref for FileMultiRnage {
+impl Deref for FileMultiRange {
     type Target = RangeSetBlaze<usize>;
 
     fn deref(&self) -> &Self::Target { &self.0 }
 }
 
-impl AsRef<RangeSetBlaze<usize>> for FileMultiRnage {
+impl AsRef<RangeSetBlaze<usize>> for FileMultiRange {
     fn as_ref(&self) -> &RangeSetBlaze<usize> { &self.0 }
 }
 
-impl From<RangeSetBlaze<usize>> for FileMultiRnage {
-    fn from(value: RangeSetBlaze<usize>) -> Self { FileMultiRnage(value) }
+impl From<RangeSetBlaze<usize>> for FileMultiRange {
+    fn from(value: RangeSetBlaze<usize>) -> Self { FileMultiRange(value) }
 }
 
-impl From<std::ops::RangeInclusive<usize>> for FileMultiRnage {
+impl From<std::ops::RangeInclusive<usize>> for FileMultiRange {
     fn from(value: std::ops::RangeInclusive<usize>) -> Self { Self(RangeSetBlaze::from_iter([value])) }
 }
 
-impl From<&[std::ops::RangeInclusive<usize>]> for FileMultiRnage {
+impl From<&[std::ops::RangeInclusive<usize>]> for FileMultiRange {
     fn from(value: &[std::ops::RangeInclusive<usize>]) -> Self { Self(RangeSetBlaze::from_iter(value)) }
 }
