@@ -1,5 +1,5 @@
 [workspace]
-members = ["discovery", "identity"]
+members = ["discovery", "identity", "task_composer"]
 resolver = "2"
 
 [workspace.dependencies]
