@@ -1,224 +1,288 @@
+// 一个异步运行时上可以有多个控制器, 但是控制器所控制的 worker 一定是本地的,这样才可以最高效率利用thread local cache
+// actor 模式
+// 将控制器设计为可以处理多种 任务的模型
 use crate::{
     http::{
         command::TaskCommand::{self, *},
-        file_range::FileMultiRange,
+        file_range::{FileMultiRange, FileRange},
         meta::HttpTaskMeta,
         qos::QosAdvice,
         status::TaskStatus,
         worker::{
-            DownloadError::{self, *},
-            Worker, WorkerFuture, WorkerResult,
+            self, WorkFailed, WorkSuccess, Worker,
+            WorkerError::{self, *},
+            WorkerFuture, WorkerResult,
         },
     },
     utils::rate_limiter::SharedRateLimiter,
 };
-use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
-use reqwest::Client;
-use std::{sync::Arc, u16};
-use tokio::{
-    select, spawn,
-    sync::{broadcast, mpsc, watch},
-    task::JoinHandle,
+use async_broadcast as broadcast;
+use compio::{
+    fs::File,
+    runtime::{JoinHandle, spawn},
 };
-use tokio_util::sync::CancellationToken;
+use compio_watch as watch;
+use cyper::Client;
+use flume as mpmc;
+use futures_util::{StreamExt, select, stream::FuturesUnordered};
+use identity::task::TaskId;
+use smol_cancellation_token::CancellationToken;
+use std::{
+    any::Any,
+    collections::{HashMap, HashSet},
+    mem,
+    num::NonZeroU8,
+    ops::{Deref, Not},
+    os::fd::FromRawFd,
+    rc::Rc,
+};
+
+// todo 一个worker 阻塞太久,尝试注销 worker
+
+pub type JoinResult<T> = Result<T, Box<dyn Any + Send>>;
+
+/// 用于 worker 和 controller 同步
+struct TaskState {
+    meta: Rc<HttpTaskMeta>,
+    committed: FileMultiRange, // 已经持久化了
+    inflight: FileMultiRange,  //正在下载中
+    max_concurrency: NonZeroU8,
+    current_concurrency: u8,
+    retries_left: u8,
+    file: File,
+    cancel: CancellationToken,
+    status: watch::Sender<TaskStatus>, /*  worker 可以用于设置对外展示的进度(主要是从视觉角度考虑),
+                                        * 控制器用于更新对外暂停状态 */
+    rate_limit: SharedRateLimiter,
+}
 
 pub struct Controller {
-    meta: Arc<HttpTaskMeta>,
-    client: Client,
-    commited: FileMultiRange, /* 用于记录任务分配的工作量，如果任务只完成了部分工作量，则归还。
-                               * 这是为了解决分配工作量给任务时，无法及时反馈会导致工作量会被重复分配 */
-    concurrency: u16,
-    retries_left: u8,
-    file: (),                               // 并发写入文件实例
-    cmd_rx: mpsc::Receiver<TaskCommand>,    // 命令邮箱
-    qos_rx: broadcast::Receiver<QosAdvice>, // qos 邮箱
-    parent_cancel: CancellationToken,
-    workers: FuturesUnordered<WorkerFuture>, // 工作者队列
-    status: watch::Sender<TaskStatus>,       // 任务
-    rate_limit: SharedRateLimiter,           // 令牌桶
+    cmd: mpmc::Receiver<TaskCommand>, // 接受主线程号令
+    tasks: HashMap<TaskId, TaskState>,
+    workers: FuturesUnordered<WorkerFuture>,
+    client: Client,                      // 跨线程共享http客户端
+    qos: broadcast::Receiver<QosAdvice>, // qos 邮箱
+    pending: HashSet<TaskId>,
 }
 
 impl Controller {
     const BLOCK_SIZE: usize = 0x100_0000;
+    const DEAFULT_MAX_CONCURRENCY: NonZeroU8 = unsafe { NonZeroU8::new_unchecked(8) };
+    const DEFAULT_MAX_RETRIES: u8 = 3;
 
-    pub fn new(
-        meta: Arc<HttpTaskMeta>, client: Client, cmd_rx: mpsc::Receiver<TaskCommand>,
-        qos_rx: broadcast::Receiver<QosAdvice>, status: watch::Sender<TaskStatus>,
-    ) -> Self {
-        const DEAFULT_CONCURRENCY: u16 = 8;
-        const DEFAULT_RETRIES: u8 = 3;
-        let file = ();
-        let rate_limit = SharedRateLimiter::new_with_no_limit();
-        let workers = FuturesUnordered::new();
-        let parent_cancel = CancellationToken::new();
-        let commited = FileMultiRange::default();
+    pub fn new(client: Client, cmd_rx: mpmc::Receiver<TaskCommand>, qos_rx: broadcast::Receiver<QosAdvice>) -> Self {
         Self {
-            meta,
+            cmd: cmd_rx,
+            tasks: Default::default(),
+            workers: FuturesUnordered::new(),
             client,
-            commited,
-            concurrency: DEAFULT_CONCURRENCY,
-            retries_left: DEFAULT_RETRIES,
-            file,
-            cmd_rx,
-            qos_rx,
-            parent_cancel,
-            workers,
-            status,
-            rate_limit,
+            qos: qos_rx,
+            pending: Default::default(),
         }
     }
 
     pub fn run(mut self) -> JoinHandle<()> {
         spawn(async move {
-            let join_worker = self
-                .workers
-                .next()
-                .map(|o| o.map(|outter| outter.map_err(|err| (None, DownloadError::JoinError(err))).flatten()));
-            select! {
-                Some(cmd) = self.cmd_rx.recv() => {
-                    self.handle_cmd(cmd);
-                }
-                Ok(qos) = self.qos_rx.recv() => {
-                    unimplemented!()
-                }
-                work_result  = join_worker => {
-                    self.handle_worker_result(work_result);
+            loop {
+                select! {
+                    cmd_res =  self.cmd.recv_async() => {
+                        self.handle_cmd_res(cmd_res);
+                    }
+                    worker_res = self.workers.next() => {
+                        self.handle_worker_res(worker_res);
+                    }
                 }
             }
         })
     }
 
-    /// 根据总量计算没有提交的部分
-    fn calculate_not_commited(&self) -> Option<FileMultiRange> {
-        self.meta.content_range().as_ref().map(|total| total - &self.commited)
+    #[inline]
+    fn calculate_block_chunk(remaining: &FileMultiRange, perfer: Option<NonZeroU8>) -> Box<[FileMultiRange]> {
+        let concurrency = perfer.unwrap_or(Self::DEAFULT_MAX_CONCURRENCY);
+        remaining.clone().window(Self::BLOCK_SIZE).take(concurrency.get().into()).collect()
     }
 
     #[inline]
-    fn handle_cmd(&mut self, cmd: TaskCommand) {
-        match cmd {
-            ChangeRateLimited(limit) => {
-                self.rate_limit.change_limit(limit);
-            }
-            Pause => {
-                self.status.send_if_modified(|status| status.state.set_pending());
-            }
-            Resume => {
-                self.status.send_if_modified(|status| status.state.set_running());
-            }
-            Cancel => {
-                // 设置eof让工作者队列停止继续分配，
-                self.status.send_if_modified(|status| status.state.set_aborted());
-                // 销毁所有工作者
-                // 销毁文件
-                // 销毁控制器
-            }
-            ChangeConcurrency(non_zero) => todo!(),
-        }
-    }
-
-    /// 在当前并发数的限制下，创建若干工作者，按照块大小分配工作量，此函数返回0 则代表工作量不足以分配新工作者
-    fn spwan_many_worker(&mut self) -> usize {
-        if self.status.borrow().state.was_stopped() {
-            return 0;
-        }
-        let Some(mut not_commited) = self.calculate_not_commited() else {
-            return 0;
+    fn check_or_set_finished(task: Option<&TaskState>) -> bool {
+        let Some(task) = task else {
+            return true;
         };
-        let mut window_iter = not_commited.window(Self::BLOCK_SIZE);
-        let more_worker_count = self.concurrency.saturating_sub(self.workers.len().try_into().unwrap_or(u16::MAX));
-        let mut acc = 0;
-        while let Some(rng) = window_iter.next()
-            && more_worker_count > acc
-        {
-            acc += 1;
-            self.spawn_and_push_worker(Some(rng));
+        let total = task.meta.content_range();
+        let is_finished = total.as_ref() == Some(&task.committed);
+        if is_finished {
+            let _ = task.status.send_if_modified(|status| status.state.set_finished());
         }
-        acc as usize
+        is_finished
     }
 
-    /// 创建一个线程，用于不知道目标大小或只支持单线程的链接
-    /// 这个不需要考虑提交，只需要更新下载内容和全部内容即可
-    fn spawn_single_worker(&mut self) {
-        if self.status.borrow().state.was_stopped() {
+    #[inline]
+    fn handle_worker_res(&mut self, worker_res: Option<JoinResult<WorkerResult>>) {
+        match worker_res {
+            Some(Ok(Ok(WorkSuccess { id, downloaded }))) => {
+                let mut task = self.tasks.get_mut(&id);
+                if let Some(ref mut task) = task {
+                    task.committed |= downloaded; // 提交已经持久化的部分
+                    task.current_concurrency -= 1; // 减少并发计数器
+                }
+                if Self::check_or_set_finished(task.as_deref()) {
+                    self.tasks.remove(&id);
+                    self.pending.remove(&id);
+                    return;
+                }
+                // 如果暂停列表没有它,继续产生工作者
+                if !self.pending.contains(&id) {
+                    self.spawn_many_worker(id);
+                }
+            }
+            Some(Ok(Err(WorkFailed { id, revert, mut err }))) => {
+                let mut task = self.tasks.get_mut(&id);
+                // 工作者请求回滚
+                if let Some(ref mut task) = task
+                    && let Some(revert) = revert
+                {
+                    task.inflight -= revert; // 取消正在下载的记录
+                    if let WorkerError::ParitalDownloaded(ref mut commited) = err {
+                        task.committed |= mem::take(commited); // 部分持久化成功
+                    }
+                }
+                if Self::check_or_set_finished(task.as_deref()) {
+                    self.tasks.remove(&id);
+                    self.pending.remove(&id);
+                    return;
+                }
+                let mut more_worker = false;
+                // 先减少并发计数器,然后可尝试次数减法 1
+                if let Some(task) = task {
+                    task.current_concurrency -= 1;
+                    // 假如队列工作者数量大于最大尝试次数会导致溢出
+                    let retries_left = task.retries_left.saturating_sub(1);
+                    task.retries_left = retries_left;
+                    more_worker = retries_left != 0;
+                    // 尝试次数耗尽,设置错误状态
+                    if !more_worker {
+                        let _ = task.status.send_if_modified(|status| status.state.set_failed(err));
+                    }
+                }
+                if !self.pending.contains(&id) && more_worker {
+                    self.spawn_many_worker(id);
+                }
+            }
+            Some(Err(err)) => {
+                panic!("{:?}", err)
+            }
+            None => {}
+        }
+    }
+
+    #[inline]
+    fn handle_cmd_res(&mut self, cmd_res: Result<TaskCommand, mpmc::RecvError>) {
+        match cmd_res {
+            Ok(ChangeRateLimited { id, limit }) => {
+                self.tasks.entry(id).and_modify(|task| task.rate_limit.change_limit(limit));
+            }
+            Ok(ChangeConcurrency { id, concuerrency }) => {
+                self.tasks.entry(id).and_modify(|task| task.max_concurrency = concuerrency);
+            }
+            Ok(Pause(id)) => {
+                self.pending.insert(id); // 不要继续创建新工作者了
+                self.tasks.entry(id).and_modify(|task| {
+                    task.cancel.cancel(); //取消现有工作者
+                    let _ = task.status.send_if_modified(|status| status.state.set_pending()); //修改对外状态
+                });
+            }
+            Ok(Resume(id)) => {
+                self.pending.remove(&id); //从黑名单中移除
+                self.tasks.entry(id).and_modify(|task| {
+                    let _ = task.status.send_if_modified(|status| status.state.set_running());
+                    task.retries_left = Self::DEFAULT_MAX_RETRIES; // 可能是因为尝试次数耗尽导致停止的,所以恢复一下
+                });
+                self.spawn_many_worker(id);
+            }
+            Ok(Cancel(ref id)) => {
+                // 从任务列表中移除
+                if let Some(task) = self.tasks.remove(id) {
+                    task.cancel.cancel(); //记得停止现有的工作者
+                }
+                self.pending.remove(id); // 清理黑名单,如果有的话
+            }
+            Ok(Create { meta, watch }) => {
+                let id = self.push_task(meta, watch);
+                self.spawn_many_worker(id);
+            }
+            Err(err) => {
+                panic!("{:?}", err)
+            }
+        }
+    }
+
+    fn push_task(&mut self, meta: HttpTaskMeta, tx: watch::Sender<TaskStatus>) -> TaskId {
+        // todo 文件分配器,这里仅仅用来占位
+        let file = unsafe { File::from_raw_fd(0) };
+        let task_state = TaskState {
+            meta: meta.into(),
+            inflight: Default::default(),
+            max_concurrency: Self::DEAFULT_MAX_CONCURRENCY,
+            current_concurrency: 0,
+            retries_left: Self::DEFAULT_MAX_RETRIES,
+            file,
+            cancel: CancellationToken::new(),
+            status: tx,
+            rate_limit: SharedRateLimiter::new_with_no_limit(),
+            committed: Default::default(),
+        };
+        let id = TaskId::new();
+        self.tasks.insert(id, task_state);
+        id
+    }
+
+    // todo 实现一个 per id 的创建批量工作者函数, 它会根据 meta (未来有可能是用户建议)来决定并发工作者数量
+    fn spawn_many_worker(&mut self, id: TaskId) {
+        let Some(task) = self.tasks.get_mut(&id) else {
+            return;
+        };
+        let available_slots = task.max_concurrency.get().saturating_sub(task.current_concurrency);
+        if available_slots == 0 {
             return;
         }
-        self.spawn_and_push_worker(None);
-    }
-
-    /// 根据 range 自动创建 worker 并 push 进队列
-    fn spawn_and_push_worker(&mut self, range: Option<FileMultiRange>) {
-        let worker = Worker::new(
-            self.meta.url(),
-            range,
-            self.client.clone(),
-            self.file,
-            self.parent_cancel.child_token(),
-            self.rate_limit.clone(),
-        );
-        let fut = worker.run();
-        self.workers.push(fut);
-    }
-
-    fn handle_worker_result(&mut self, result: Option<WorkerResult>) {
-        match result {
-            Some(Ok(rng)) => {
-                // 更新下载进度
-                self.status.send_if_modified(|status| {
-                    if rng.is_empty() {
-                        return false;
-                    }
-                    status.downloaded |= rng;
-                    true
-                });
-                // 如果是多线程下载的继续添加更多工作者，没有工作量了就标志任务已经完成
-                if self.meta.is_support_ranges() && self.spwan_many_worker() == 0 {
-                    self.status.send_modify(|status| {
-                        status.state.set_finished();
-                    });
-                }
-                // 如果是单线程下载，那么到这里应该结束了，直接返回
-            }
-            Some(Err((full, ParitalDownloaded(partial)))) => {
-                // 更新已下载的进度并归还没下载的进度
-                let not_downloaded = &full.unwrap() - &partial; // 遇到 partial 的时候，full 必定不为空
-                self.status.send_if_modified(|status| {
-                    status.downloaded |= partial;
-                    if not_downloaded.is_empty() {
-                        return false;
-                    }
-                    self.commited -= not_downloaded;
-                    true
-                });
-                // 此时应当还有工作量，直接添加更多工作者
-                if self.meta.is_support_ranges() {
-                    self.spwan_many_worker();
-                }
-            }
-            // 任务刚初始化还没有工作者时，尝试添加更多工作者
-            None if self.meta.is_support_ranges() && self.status.borrow().state.is_idle() => {
-                // 比较少见的情况是这个任务的文件是0大小
-                if self.spwan_many_worker() == 0 {
-                    self.status.send_modify(|status| {
-                        status.state.set_finished();
-                    });
-                }
-            }
-            // 如果不支持多线程下载，且任务刚创建处于空闲，往工作者队列添加一个工作者
-            None if self.status.borrow().state.is_idle() => {
-                self.spawn_single_worker();
-            }
-
-            // todo 新增远程线程限制异常，用于主动控制并发数量
-            // 处理其他错误，归还工作量即可
-            Some(Err((Some(full), err))) => {
-                self.status.send_modify(|status| {
-                    status.state.set_failed(err);
-                });
-                self.commited -= full;
-            }
-            // 这里处理非空闲但是工作者队列现在为空的情况，比如暂停，取消，之前的错误
-            _ => {}
+        let meta = task.meta.as_ref();
+        let is_single = meta.is_support_ranges().not();
+        let perfer = is_single.then_some(unsafe { NonZeroU8::new_unchecked(1) });
+        if is_single {
+            let fut = Worker::new(
+                id,
+                meta.url(),
+                None,
+                self.client.clone(),
+                task.file.clone(),
+                task.cancel.child_token(),
+                task.rate_limit.clone(),
+                task.status.clone(),
+            )
+            .run();
+            task.current_concurrency += 1;
+            //不需要标记哪些块在下载
+            self.workers.push(fut);
+            return;
         }
-        return;
+        let mut remaining = meta.content_range().unwrap_or_default();
+        remaining -= task.committed.clone();
+        remaining -= task.inflight.clone();
+        let blks = Self::calculate_block_chunk(&remaining, perfer).into_iter().take(available_slots.into());
+        for blk in blks {
+            let fut = Worker::new(
+                id,
+                meta.url(),
+                Some(blk.clone()),
+                self.client.clone(),
+                task.file.clone(),
+                task.cancel.child_token(),
+                task.rate_limit.clone(),
+                task.status.clone(),
+            )
+            .run();
+            task.current_concurrency += 1; // 增加并发计数器
+            task.inflight |= blk; // 这个块正在下载
+            self.workers.push(fut);
+        }
     }
 }

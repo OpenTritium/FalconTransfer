@@ -1,10 +1,14 @@
-use std::num::{NonZeroU16, NonZeroU32};
+use crate::http::{meta::HttpTaskMeta, status::TaskStatus};
+use compio_watch as watch;
+use identity::task::TaskId;
+use std::num::{NonZeroU8, NonZeroU32};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum TaskCommand {
-    ChangeConcurrency(NonZeroU16),
-    ChangeRateLimited(Option<NonZeroU32>),
-    Pause,
-    Resume,
-    Cancel,
+    ChangeConcurrency { id: TaskId, concuerrency: NonZeroU8 },
+    ChangeRateLimited { id: TaskId, limit: Option<NonZeroU32> },
+    Pause(TaskId),
+    Resume(TaskId),
+    Cancel(TaskId),
+    Create { meta: HttpTaskMeta, watch: watch::Sender<TaskStatus> },
 }

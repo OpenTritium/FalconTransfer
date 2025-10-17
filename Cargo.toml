@@ -3,4 +3,13 @@ members = ["discovery", "identity", "task_composer"]
 resolver = "2"
 
 [workspace.dependencies]
-tokio = { version = "1.47.1", features = ["full"] }
+thiserror = "2.0.17"
+compio = { version = "0.16.0", features = [
+  "dispatcher",
+  "macros",
+  "nightly",
+  "process",
+  "time",
+] }
+flume = { version = "0.11.1", default-features = false, features = ["async"] }
+futures-util = "0.3.31"

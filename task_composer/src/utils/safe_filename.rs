@@ -2,6 +2,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use sanitize_filename_reader_friendly::sanitize;
 use std::ops::Deref;
 
+#[derive(Debug, Clone)]
 pub struct SafeFileName(Utf8PathBuf);
 
 impl Deref for SafeFileName {

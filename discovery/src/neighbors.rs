@@ -1,4 +1,4 @@
-use crate::client::InstanceName;
+use crate::listen::InstanceName;
 use dashmap::DashMap;
 use mdns_sd::ScopedIp;
 use std::{

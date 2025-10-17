@@ -3,13 +3,14 @@ use crate::{
     utils::safe_filename::SafeFileName,
 };
 use camino::Utf8Path;
+use cyper::Response;
 use fastdate::DateTime;
 use http::header::CONTENT_TYPE;
 use mime::{APPLICATION_OCTET_STREAM, Mime};
-use reqwest::Response;
 use sanitize_filename_reader_friendly::sanitize;
 use url::Url;
 
+#[derive(Debug, Clone)]
 pub struct HttpTaskMeta {
     url: Url,
     name: SafeFileName,

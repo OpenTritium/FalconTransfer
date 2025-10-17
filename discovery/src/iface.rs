@@ -1,7 +1,7 @@
 use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
 use std::{net::IpAddr, ops::Not};
 
-pub(crate) fn collect_non_loopback() -> network_interface::Result<Vec<IpAddr>> {
+pub fn collect_non_loopback() -> network_interface::Result<Vec<IpAddr>> {
     let iface_chunk = NetworkInterface::show()?;
     Ok(iface_chunk
         .into_iter()

@@ -1,24 +1,48 @@
+use compio::{buf::IoBuf, fs::File, io::AsyncWriteAtExt};
 use range_set_blaze::RangeSetBlaze;
 use std::{
-    ops::{BitOr, BitOrAssign, Deref, Sub, SubAssign},
+    io,
+    ops::{self, BitOr, BitOrAssign, Deref, Sub, SubAssign},
     range,
 };
+
+#[derive(Debug, Clone, Copy)]
+pub struct FileRange(range::RangeInclusive<usize>);
+
+impl Deref for FileRange {
+    type Target = range::RangeInclusive<usize>;
+
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
 
 pub trait IntoRangeHeader {
     fn into_header_value(&self) -> Option<String>;
 }
 
-impl From<std::ops::RangeInclusive<usize>> for FileRange {
-    fn from(value: std::ops::RangeInclusive<usize>) -> Self { Self(value.into()) }
+impl From<ops::RangeInclusive<usize>> for FileRange {
+    fn from(value: ops::RangeInclusive<usize>) -> Self { Self(value.into()) }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct FileRange(range::RangeInclusive<usize>);
+impl From<ops::Range<usize>> for FileRange {
+    fn from(value: ops::Range<usize>) -> Self { Self((value.start..=value.end - 1).into()) }
+}
+
+impl From<FileRange> for ops::RangeInclusive<usize> {
+    fn from(value: FileRange) -> Self { value.0.into() }
+}
+
+impl From<FileRange> for range::RangeInclusive<usize> {
+    fn from(value: FileRange) -> Self { value.0 }
+}
 
 impl IntoRangeHeader for FileRange {
     fn into_header_value(&self) -> Option<String> {
-        Some(format!("bytes={start}-{end}", start = self.0.start, end = self.0.end))
+        Some(format!("bytes={start}-{end}", start = self.0.start, end = self.0.last))
     }
+}
+
+impl FileRange {
+    pub fn contains(&self, rhs: Self) -> bool { self.start >= rhs.start && self.last >= rhs.last }
 }
 
 pub struct Window<'a> {
@@ -70,30 +94,28 @@ impl FileMultiRange {
         (head_set.into(), tail_set.into())
     }
 
+    pub fn is_superset_for(&self, rng: FileRange) -> bool {
+        let rng: range::RangeInclusive<usize> = rng.into();
+        self.range(rng).next().is_some()
+    }
+
+    /// 指向待写入位置
+    pub fn cursor(&self) -> usize { self.last().map_or(0, |x| x + 1) }
+
     pub fn window(&mut self, max: usize) -> Window<'_> { Window { max, inner: self } }
 
     pub fn insert_range(&mut self, rng: FileRange) {
-        let rng = rng.0.start..=rng.0.end;
-        self.0.ranges_insert(rng);
-    }
-
-    pub fn push_n_at(&mut self, at: usize, n: usize) {
-        if n == 0 {
-            return;
-        }
-        let start = at;
-        let end = self.last().and_then(|end| (end > at).then_some(end + n)).unwrap_or(at + n) - 1;
-        let rng = start..=end;
+        let rng = rng.0.start..=rng.0.last;
         self.0.ranges_insert(rng);
     }
 }
 
 impl BitOrAssign for FileMultiRange {
-    fn bitor_assign(&mut self, rhs: Self) { self.0 = (self.as_ref() | rhs.as_ref()).into() }
+    fn bitor_assign(&mut self, rhs: Self) { self.0 = self.as_ref() | rhs.as_ref() }
 }
 
 impl SubAssign for FileMultiRange {
-    fn sub_assign(&mut self, rhs: Self) { self.0 = (self.as_ref() - rhs.as_ref()).into() }
+    fn sub_assign(&mut self, rhs: Self) { self.0 = self.as_ref() - rhs.as_ref() }
 }
 
 impl BitOr for &FileMultiRange {
@@ -134,9 +156,50 @@ impl From<RangeSetBlaze<usize>> for FileMultiRange {
 }
 
 impl From<std::ops::RangeInclusive<usize>> for FileMultiRange {
-    fn from(value: std::ops::RangeInclusive<usize>) -> Self { Self(RangeSetBlaze::from_iter([value])) }
+    fn from(value: std::ops::RangeInclusive<usize>) -> Self { Self(RangeSetBlaze::from_iter(value)) }
 }
 
 impl From<&[std::ops::RangeInclusive<usize>]> for FileMultiRange {
     fn from(value: &[std::ops::RangeInclusive<usize>]) -> Self { Self(RangeSetBlaze::from_iter(value)) }
+}
+
+impl From<range::RangeInclusive<usize>> for FileMultiRange {
+    fn from(value: range::RangeInclusive<usize>) -> Self { (value.start..=value.last).into() }
+}
+
+impl From<FileRange> for FileMultiRange {
+    fn from(value: FileRange) -> Self { value.0.into() }
+}
+
+pub struct FileCursor<'a> {
+    file: &'a mut File,
+    rng: FileMultiRange,
+    pos: u64,
+}
+
+impl<'a> FileCursor<'a> {
+    pub fn into_range(self) -> FileMultiRange { self.rng }
+
+    pub async fn write_all<T: IoBuf>(&mut self, buf: T) -> io::Result<()> {
+        let len = buf.buf_len();
+        // 修改点：使用 self.position 作为写入位置
+        let result = self.file.write_all_at(buf, self.pos).await.0;
+
+        result.inspect(|_| {
+            let pos = self.pos as usize;
+            let written_range = (pos)..(pos + len);
+            self.rng.insert_range(written_range.into());
+            self.pos += len as u64;
+        })
+    }
+
+    pub fn with_position(file: &'a mut File, pos: u64) -> FileCursor<'a> {
+        FileCursor { file, rng: FileMultiRange::default(), pos }
+    }
+
+    pub fn range(&self) -> &FileMultiRange { &self.rng }
+}
+
+impl<'a> From<&'a mut File> for FileCursor<'a> {
+    fn from(file: &'a mut File) -> Self { FileCursor { file, rng: FileMultiRange::default(), pos: 0 } }
 }

@@ -2,11 +2,13 @@ use crate::{ALPN_ID, FULLNAME_SUFFIX, SERVICE_TYPE, iface::collect_non_loopback}
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(crate) struct Server {
+/// 局域网组播发布服务
+pub struct AnnounceDaemon {
     instance_name: Box<str>,
     daemon: ServiceDaemon,
 }
 
+/// 不要相信你的主机名
 fn sanitize_hostname_to_instancename(name: &str) -> Box<str> {
     let mut buf = String::with_capacity(name.len());
     for c in name.chars() {
@@ -34,8 +36,9 @@ fn timestamp_based_str() -> Box<str> {
     format!("{:X}", nanos).into_boxed_str()
 }
 
-impl Server {
-    pub(crate) fn new() -> Self {
+impl AnnounceDaemon {
+    /// 创建守护进程
+    pub fn new() -> Self {
         let hostname = hostname::get()
             .ok()
             .and_then(|os_str| os_str.into_string().map(|s| s.into_boxed_str()).ok())
@@ -47,7 +50,8 @@ impl Server {
         Self { instance_name, daemon }
     }
 
-    pub(crate) fn run(&self) -> mdns_sd::Result<()> {
+    /// 注册服务
+    pub fn register(&self) -> mdns_sd::Result<()> {
         let addrs = collect_non_loopback().expect("local addr is empty");
         let dns_hostname = format!("{}.local.", self.instance_name);
         let porp = [("alpn", ALPN_ID)];
@@ -64,7 +68,7 @@ impl Server {
     }
 }
 
-impl Drop for Server {
+impl Drop for AnnounceDaemon {
     fn drop(&mut self) {
         let mut fullname = self.instance_name.to_string();
         fullname.push_str(FULLNAME_SUFFIX);

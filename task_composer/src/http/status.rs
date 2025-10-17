@@ -1,4 +1,4 @@
-use crate::http::{file_range::FileMultiRange, worker::DownloadError};
+use crate::http::{file_range::FileMultiRange, worker::WorkerError};
 
 #[derive(Debug, Default)]
 pub struct TaskStatus {
@@ -17,11 +17,11 @@ impl TaskStatus {
 pub enum TaskState {
     #[default]
     Idle, // 空闲，刚创建好但是没有worker 的状态
-    Aborted,               // 已中止
-    Running,               // 运行中
-    Pending,               // 已暂停/等待中
-    Finished,              // 正常完成 (对应 eof)
-    Failed(DownloadError), // 出错了 (对应 last_err 和 eof)
+    Aborted,             // 已中止
+    Running,             // 运行中
+    Pending,             // 已暂停/等待中
+    Finished,            // 正常完成 (对应 eof)
+    Failed(WorkerError), // 出错了 (对应 last_err 和 eof)
 }
 
 impl TaskState {
@@ -37,7 +37,8 @@ impl TaskState {
 
     pub fn is_failed(&self) -> bool { matches!(self, TaskState::Failed(_)) }
 
-    pub fn was_stopped(&self) -> bool { self.is_aborted() || self.is_finished() || self.is_failed() }
+    /// 状态是否停止（中断，完成，失败）
+    pub fn is_stopped(&self) -> bool { self.is_aborted() || self.is_finished() || self.is_failed() }
 
     pub fn set_idle(&mut self) -> bool {
         if self.is_idle() {
@@ -84,7 +85,7 @@ impl TaskState {
         }
     }
 
-    pub fn set_failed(&mut self, err: DownloadError) -> bool {
+    pub fn set_failed(&mut self, err: WorkerError) -> bool {
         *self = TaskState::Failed(err);
         true
     }
