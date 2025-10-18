@@ -9,6 +9,7 @@ pub enum TaskCommand {
     ChangeRateLimited { id: TaskId, limit: Option<NonZeroU32> },
     Pause(TaskId),
     Resume(TaskId),
-    Cancel(TaskId),
-    Create { meta: HttpTaskMeta, watch: watch::Sender<TaskStatus> },
+    Cancel(TaskId), //取消但暂时不移除任务,因为它会drop 观测器,导致外部无法获悉状态
+    Create { meta: Box<HttpTaskMeta>, watch: Box<watch::Sender<TaskStatus>> },
+    Remove(TaskId), // 我已经观测到取消,准许移除任务
 }

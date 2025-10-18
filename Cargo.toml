@@ -1,9 +1,8 @@
 [workspace]
-members = ["discovery", "identity", "task_composer"]
 resolver = "2"
+members = ["discovery", "identity", "task_composer"]
 
 [workspace.dependencies]
-thiserror = "2.0.17"
 compio = { version = "0.16.0", features = [
   "dispatcher",
   "macros",
@@ -13,3 +12,5 @@ compio = { version = "0.16.0", features = [
 ] }
 flume = { version = "0.11.1", default-features = false, features = ["async"] }
 futures-util = "0.3.31"
+thiserror = "2.0.17"
+typed-builder = "0.22.0"

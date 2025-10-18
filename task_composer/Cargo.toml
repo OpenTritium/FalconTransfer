@@ -4,12 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-identity = { path = "../identity" }
 arc-swap = "1.7.1"
-compio-watch = { git = "https://github.com/OpenTritium/compio_watch.git" }
 async-broadcast = "0.7.2"
 camino = "1.2.0"
 compio = { workspace = true }
+compio-watch = { git = "https://github.com/OpenTritium/compio_watch.git" }
 cyper = { version = "0.5.0", default-features = false, features = [
   "cookies",
   "http2",
@@ -23,6 +22,7 @@ flume = { workspace = true }
 futures-util = { workspace = true }
 governor = "0.10.1"
 http = "1.3.1"
+identity = { path = "../identity" }
 mime = "0.3.17"
 multipart_async_stream = "0.2.4"
 percent-encoding = "2.3.2"
@@ -31,6 +31,7 @@ regex = "1.11.2"
 sanitize-filename-reader-friendly = "2.3.0"
 smol-cancellation-token = "0.1.1"
 thiserror = { workspace = true }
+typed-builder = { workspace = true }
 url = "2.5.7"
 utc = "0.2.0"
 

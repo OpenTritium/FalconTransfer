@@ -45,20 +45,20 @@ impl FileRange {
     pub fn contains(&self, rhs: Self) -> bool { self.start >= rhs.start && self.last >= rhs.last }
 }
 
-pub struct Window<'a> {
-    max: usize,
-    inner: &'a mut FileMultiRange,
+pub struct BlockChunks {
+    remaining: FileMultiRange,
+    block_size: usize,
 }
 
-impl<'a> Iterator for Window<'a> {
+impl Iterator for BlockChunks {
     type Item = FileMultiRange;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.inner.is_empty() {
+        if self.remaining.is_empty() {
             return None;
         }
-        let (head, tail) = self.inner.split_at(self.max);
-        *self.inner = tail;
+        let (head, tail) = self.remaining.split_at(self.block_size);
+        self.remaining = tail;
         Some(head)
     }
 }
@@ -102,7 +102,7 @@ impl FileMultiRange {
     /// 指向待写入位置
     pub fn cursor(&self) -> usize { self.last().map_or(0, |x| x + 1) }
 
-    pub fn window(&mut self, max: usize) -> Window<'_> { Window { max, inner: self } }
+    pub fn into_chunks(self, block_size: usize) -> BlockChunks { BlockChunks { remaining: self, block_size } }
 
     pub fn insert_range(&mut self, rng: FileRange) {
         let rng = rng.0.start..=rng.0.last;

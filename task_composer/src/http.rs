@@ -1,6 +1,6 @@
 mod command;
 mod composer;
-mod controller;
+mod dispatcher;
 mod file_range;
 mod header_map_ext;
 mod meta;

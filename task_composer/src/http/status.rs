@@ -17,7 +17,6 @@ impl TaskStatus {
 pub enum TaskState {
     #[default]
     Idle, // 空闲，刚创建好但是没有worker 的状态
-    Aborted,             // 已中止
     Running,             // 运行中
     Pending,             // 已暂停/等待中
     Finished,            // 正常完成 (对应 eof)
@@ -26,8 +25,6 @@ pub enum TaskState {
 
 impl TaskState {
     pub fn is_idle(&self) -> bool { matches!(self, TaskState::Idle) }
-
-    pub fn is_aborted(&self) -> bool { matches!(self, TaskState::Aborted) }
 
     pub fn is_running(&self) -> bool { matches!(self, TaskState::Running) }
 
@@ -38,7 +35,7 @@ impl TaskState {
     pub fn is_failed(&self) -> bool { matches!(self, TaskState::Failed(_)) }
 
     /// 状态是否停止（中断，完成，失败）
-    pub fn is_stopped(&self) -> bool { self.is_aborted() || self.is_finished() || self.is_failed() }
+    pub fn is_stopped(&self) -> bool { self.is_finished() || self.is_failed() }
 
     pub fn set_idle(&mut self) -> bool {
         if self.is_idle() {
@@ -72,15 +69,6 @@ impl TaskState {
             false
         } else {
             *self = TaskState::Finished;
-            true
-        }
-    }
-
-    pub fn set_aborted(&mut self) -> bool {
-        if self.is_aborted() {
-            false
-        } else {
-            *self = TaskState::Aborted;
             true
         }
     }

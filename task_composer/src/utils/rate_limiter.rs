@@ -2,7 +2,7 @@ use arc_swap::ArcSwapOption;
 use governor::{DefaultDirectRateLimiter, InsufficientCapacity, Quota};
 use std::{num::NonZeroU32, sync::Arc};
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct SharedRateLimiter(Arc<ArcSwapOption<DefaultDirectRateLimiter>>);
 
 impl SharedRateLimiter {
