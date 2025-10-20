@@ -5,43 +5,48 @@ pub struct TaskStatus {
     pub total: FileMultiRange, // 用于展示下载总量，当目标大小未知时，与已下载量同步
     pub downloaded: FileMultiRange,
     pub state: TaskState,
+    pub err: Option<WorkerError>,
 }
 
 impl TaskStatus {
-    pub fn new(total: FileMultiRange, downloaded: FileMultiRange, state: TaskState) -> Self {
-        Self { total, downloaded, state }
-    }
+    pub fn has_err(&self) -> bool { self.err.is_some() }
+
+    pub fn set_err(&mut self, err: WorkerError) { self.err = Some(err); }
 }
 
 #[derive(Debug, Default)]
 pub enum TaskState {
     #[default]
     Idle, // 空闲，刚创建好但是没有worker 的状态
-    Running,             // 运行中
-    Pending,             // 已暂停/等待中
-    Finished,            // 正常完成 (对应 eof)
-    Failed(WorkerError), // 出错了 (对应 last_err 和 eof)
+    Running,   // 运行中
+    Pending,   // 已暂停
+    Finished,  // 正常完成
+    Cancelled, // 被取消
+    Failed,    //超过错误计数
 }
+use TaskState::*;
 
 impl TaskState {
-    pub fn is_idle(&self) -> bool { matches!(self, TaskState::Idle) }
+    pub fn is_idle(&self) -> bool { matches!(self, Idle) }
 
-    pub fn is_running(&self) -> bool { matches!(self, TaskState::Running) }
+    pub fn is_running(&self) -> bool { matches!(self, Running) }
 
-    pub fn is_pending(&self) -> bool { matches!(self, TaskState::Pending) }
+    pub fn is_pending(&self) -> bool { matches!(self, Pending) }
 
-    pub fn is_finished(&self) -> bool { matches!(self, TaskState::Finished) }
+    pub fn is_finished(&self) -> bool { matches!(self, Finished) }
 
-    pub fn is_failed(&self) -> bool { matches!(self, TaskState::Failed(_)) }
+    pub fn is_cancelled(&self) -> bool { matches!(self, Cancelled) }
 
-    /// 状态是否停止（中断，完成，失败）
-    pub fn is_stopped(&self) -> bool { self.is_finished() || self.is_failed() }
+    pub fn is_failed(&self) -> bool { matches!(self, Failed) }
+
+    /// 任务完成，取消或失败
+    pub fn is_terminal(&self) -> bool { matches!(self, Finished | Cancelled | Failed) }
 
     pub fn set_idle(&mut self) -> bool {
         if self.is_idle() {
             false
         } else {
-            *self = TaskState::Idle;
+            *self = Idle;
             true
         }
     }
@@ -50,7 +55,7 @@ impl TaskState {
         if self.is_running() {
             false
         } else {
-            *self = TaskState::Running;
+            *self = Running;
             true
         }
     }
@@ -59,7 +64,7 @@ impl TaskState {
         if self.is_pending() {
             false
         } else {
-            *self = TaskState::Pending;
+            *self = Pending;
             true
         }
     }
@@ -68,13 +73,26 @@ impl TaskState {
         if self.is_finished() {
             false
         } else {
-            *self = TaskState::Finished;
+            *self = Finished;
             true
         }
     }
 
-    pub fn set_failed(&mut self, err: WorkerError) -> bool {
-        *self = TaskState::Failed(err);
-        true
+    pub fn set_cancelled(&mut self) -> bool {
+        if self.is_cancelled() {
+            false
+        } else {
+            *self = Cancelled;
+            true
+        }
+    }
+
+    pub fn set_failed(&mut self) -> bool {
+        if self.is_failed() {
+            false
+        } else {
+            *self = Failed;
+            true
+        }
     }
 }

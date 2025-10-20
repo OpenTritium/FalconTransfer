@@ -2,6 +2,7 @@ use http::{
     HeaderMap, HeaderName,
     header::{ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE},
 };
+use mime::{FromStrError, Mime};
 use percent_encoding::percent_decode_str;
 use regex::Regex;
 use std::sync::LazyLock;
@@ -17,6 +18,12 @@ pub enum HeaderMapExtError {
     FieldFormat(HeaderName, String),
     #[error("")]
     HeaderToStr(#[from] http::header::ToStrError),
+    #[error("")]
+    InvalidMime(#[from] FromStrError),
+    #[error("")]
+    NotMultipart(Mime),
+    #[error("")]
+    NotFoundBoundary(Mime),
 }
 
 pub trait HeaderMapExt {
@@ -32,14 +39,12 @@ impl HeaderMapExt for HeaderMap {
         use HeaderMapExtError::*;
         let content_type =
             self.get(CONTENT_TYPE).ok_or_else(|| FieldNotExist(CONTENT_TYPE)).and_then(|h| Ok(h.to_str()?))?;
-        if !content_type.contains("multipart/byteranges") {
-            return Err(FieldFormat(CONTENT_TYPE, content_type.to_string()));
+        let mime: Mime = content_type.parse()?;
+        if mime.type_() != mime::MULTIPART {
+            return Err(NotMultipart(mime));
         }
-        let Some(bd_str) = content_type.split("boundary=").nth(1) else {
-            return Err(FieldFormat(CONTENT_TYPE, content_type.to_string()));
-        };
-        let bd = bd_str.trim().as_bytes().to_vec().into_boxed_slice();
-        Ok(bd)
+        let bd = mime.get_param(mime::BOUNDARY).ok_or_else(|| NotFoundBoundary(mime.clone()))?.as_str();
+        Ok(bd.as_bytes().into())
     }
 
     // 总是返回单个rng
@@ -55,9 +60,7 @@ impl HeaderMapExt for HeaderMap {
                 .ok_or_else(|| FieldFormat(CONTENT_RANGE, content_range.to_string()))?
                 .as_str()
                 .parse::<usize>()
-                .map_err(|err| {
-                    FieldFormat(CONTENT_RANGE, format!("raw: {}, parse int err: {:?}", content_range.to_string(), err))
-                })
+                .map_err(|err| FieldFormat(CONTENT_RANGE, format!("raw: {}, parse int err: {:?}", content_range, err)))
         };
         let start = cap_idx(1)?;
         let end = cap_idx(2)?;

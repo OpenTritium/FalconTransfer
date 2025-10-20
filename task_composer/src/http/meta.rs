@@ -1,5 +1,7 @@
+use std::ops::Not;
+
 use crate::{
-    http::{file_range::FileMultiRange, header_map_ext::HeaderMapExt},
+    http::{file_range::FileMultiRange, header_map_ext::HeaderMapExt, worker::GLOBAL_HTTP_CLIENT},
     utils::safe_filename::SafeFileName,
 };
 use camino::Utf8Path;
@@ -26,6 +28,8 @@ impl HttpTaskMeta {
 
     pub fn name(&self) -> &str { self.name.as_str() }
 
+    pub fn mime(&self) -> &Mime { &self.mime }
+
     pub fn path(&self) -> &Utf8Path { &self.name }
 
     /// 返回 None 代表 header 未告知文件大小
@@ -46,7 +50,7 @@ impl From<Response> for HttpTaskMeta {
         fn parse_filename_from_url(url: &Url) -> Option<String> {
             url.path_segments()
                 .and_then(|mut segs| segs.next_back())
-                .and_then(|name| name.is_empty().then_some(name.to_string()))
+                .and_then(|name| name.is_empty().not().then_some(name.to_string()))
         }
         let headers = resp.headers();
         let url = resp.url();
@@ -66,5 +70,26 @@ impl From<Response> for HttpTaskMeta {
             .into();
         let ranges_support = headers.parse_accept_ranges();
         Self { name: filename, size: content_length, mime: content_type, ranges_support, url: url.clone() }
+    }
+}
+
+pub async fn fetch_meta(url: &Url) -> cyper::Result<HttpTaskMeta> {
+    if let Ok(resp) = GLOBAL_HTTP_CLIENT.head(url.clone())?.send().await {
+        return Ok(resp.into());
+    }
+    if let Ok(resp) = GLOBAL_HTTP_CLIENT.get(url.clone())?.send().await {
+        return Ok(resp.into());
+    }
+    Err(cyper::Error::Timeout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[compio::test]
+    async fn test_fetch_meta() {
+        let url = Url::parse("https://releases.ubuntu.com/24.04/ubuntu-24.04.3-desktop-amd64.iso").unwrap();
+        let meta = fetch_meta(&url).await.unwrap();
+        println!("{:?}", meta);
     }
 }

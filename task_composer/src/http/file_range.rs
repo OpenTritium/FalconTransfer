@@ -1,8 +1,8 @@
 use compio::{buf::IoBuf, fs::File, io::AsyncWriteAtExt};
 use range_set_blaze::RangeSetBlaze;
 use std::{
-    io,
-    ops::{self, BitOr, BitOrAssign, Deref, Sub, SubAssign},
+    io, mem,
+    ops::{self, BitOr, BitOrAssign, Deref, DerefMut, Sub, SubAssign},
     range,
 };
 
@@ -12,54 +12,67 @@ pub struct FileRange(range::RangeInclusive<usize>);
 impl Deref for FileRange {
     type Target = range::RangeInclusive<usize>;
 
+    #[inline]
     fn deref(&self) -> &Self::Target { &self.0 }
 }
 
 pub trait IntoRangeHeader {
-    fn into_header_value(&self) -> Option<String>;
+    fn as_header_value(&self) -> Option<String>;
 }
 
 impl From<ops::RangeInclusive<usize>> for FileRange {
+    #[inline]
     fn from(value: ops::RangeInclusive<usize>) -> Self { Self(value.into()) }
 }
 
 impl From<ops::Range<usize>> for FileRange {
+    #[inline]
     fn from(value: ops::Range<usize>) -> Self { Self((value.start..=value.end - 1).into()) }
 }
 
 impl From<FileRange> for ops::RangeInclusive<usize> {
+    #[inline]
     fn from(value: FileRange) -> Self { value.0.into() }
 }
 
 impl From<FileRange> for range::RangeInclusive<usize> {
+    #[inline]
     fn from(value: FileRange) -> Self { value.0 }
 }
 
 impl IntoRangeHeader for FileRange {
-    fn into_header_value(&self) -> Option<String> {
+    fn as_header_value(&self) -> Option<String> {
         Some(format!("bytes={start}-{end}", start = self.0.start, end = self.0.last))
     }
 }
 
 impl FileRange {
+    #[inline]
     pub fn contains(&self, rhs: Self) -> bool { self.start >= rhs.start && self.last >= rhs.last }
 }
 
-pub struct BlockChunks {
-    remaining: FileMultiRange,
+#[derive(Debug)]
+pub struct BlockChunks<'a> {
+    remaining: &'a mut FileMultiRange,
     block_size: usize,
 }
 
-impl Iterator for BlockChunks {
+impl Iterator for BlockChunks<'_> {
     type Item = FileMultiRange;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining.is_empty() {
-            return None;
+        let mid = self.remaining.first()? + self.block_size - 1;
+        let mut tail = self.remaining.split_off(mid);
+        // 尾巴已经没东西了，检查刚切出来的东西
+        if tail.is_empty() {
+            if self.remaining.is_empty() {
+                return None;
+            }
+            return Some(mem::take(self.remaining));
         }
-        let (head, tail) = self.remaining.split_at(self.block_size);
-        self.remaining = tail;
-        Some(head)
+        mem::swap(&mut tail, self.remaining);
+        Some(FileMultiRange(tail))
     }
 }
 
@@ -67,76 +80,56 @@ impl Iterator for BlockChunks {
 pub struct FileMultiRange(RangeSetBlaze<usize>);
 
 impl FileMultiRange {
-    pub fn split_at(&self, block_size: usize) -> (FileMultiRange, FileMultiRange) {
-        let mut head_set = RangeSetBlaze::new();
-        let mut tail_set = RangeSetBlaze::new();
-        let mut acc_len: usize = 0;
-
-        for rng in self.0.ranges() {
-            if acc_len >= block_size {
-                tail_set.ranges_insert(rng);
-                continue;
-            }
-            let rng_len = rng.end() - rng.start() + 1;
-            let needed = block_size - acc_len;
-            if rng_len <= needed {
-                head_set.ranges_insert(rng);
-                acc_len += rng_len;
-            } else {
-                let split_point = rng.start() + needed - 1;
-                head_set.ranges_insert(*rng.start()..=split_point);
-                if split_point < *rng.end() {
-                    tail_set.ranges_insert((split_point + 1)..=*rng.end());
-                }
-                acc_len += needed;
-            }
-        }
-        (head_set.into(), tail_set.into())
-    }
-
+    #[inline]
     pub fn is_superset_for(&self, rng: FileRange) -> bool {
         let rng: range::RangeInclusive<usize> = rng.into();
         self.range(rng).next().is_some()
     }
 
+    #[inline]
+    pub fn as_block_chunks(&mut self, block_size: usize) -> Option<BlockChunks<'_>> {
+        Some(BlockChunks { remaining: self, block_size })
+    }
+
     /// 指向待写入位置
+    #[inline]
     pub fn cursor(&self) -> usize { self.last().map_or(0, |x| x + 1) }
 
-    pub fn into_chunks(self, block_size: usize) -> BlockChunks { BlockChunks { remaining: self, block_size } }
-
+    #[inline]
     pub fn insert_range(&mut self, rng: FileRange) {
         let rng = rng.0.start..=rng.0.last;
         self.0.ranges_insert(rng);
     }
-}
 
-impl BitOrAssign for FileMultiRange {
-    fn bitor_assign(&mut self, rhs: Self) { self.0 = self.as_ref() | rhs.as_ref() }
-}
+    #[inline]
+    pub fn union_assign(&mut self, rhs: &Self) { self.0 = self.as_ref() | rhs.as_ref() }
 
-impl SubAssign for FileMultiRange {
-    fn sub_assign(&mut self, rhs: Self) { self.0 = self.as_ref() - rhs.as_ref() }
+    #[inline]
+    pub fn difference_assign(&mut self, rhs: &Self) { self.0 = self.as_ref() - rhs.as_ref() }
 }
 
 impl BitOr for &FileMultiRange {
     type Output = FileMultiRange;
 
+    #[inline]
     fn bitor(self, rhs: Self) -> Self::Output { (self.as_ref() | rhs.as_ref()).into() }
 }
 
 impl Sub for &FileMultiRange {
     type Output = FileMultiRange;
 
+    #[inline]
     fn sub(self, rhs: Self) -> Self::Output { (self.as_ref() - rhs.as_ref()).into() }
 }
 
 impl IntoRangeHeader for FileMultiRange {
     /// 如果这是一个空返回则返回 None，不会返回空字符串
-    fn into_header_value(&self) -> Option<String> {
+    #[inline]
+    fn as_header_value(&self) -> Option<String> {
         if self.0.is_empty() {
             return None;
         }
-        let parts = self.0.ranges().map(|r| format!("{}-{}", r.start(), r.end())).collect::<Vec<_>>().join(",");
+        let parts = self.0.ranges().map(|r| format!("{}-{}", r.start(), r.end())).collect::<Box<[_]>>().join(",");
         Some(format!("bytes={parts}"))
     }
 }
@@ -144,30 +137,42 @@ impl IntoRangeHeader for FileMultiRange {
 impl Deref for FileMultiRange {
     type Target = RangeSetBlaze<usize>;
 
+    #[inline]
     fn deref(&self) -> &Self::Target { &self.0 }
 }
 
+impl DerefMut for FileMultiRange {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+}
+
 impl AsRef<RangeSetBlaze<usize>> for FileMultiRange {
+    #[inline]
     fn as_ref(&self) -> &RangeSetBlaze<usize> { &self.0 }
 }
 
 impl From<RangeSetBlaze<usize>> for FileMultiRange {
+    #[inline]
     fn from(value: RangeSetBlaze<usize>) -> Self { FileMultiRange(value) }
 }
 
 impl From<std::ops::RangeInclusive<usize>> for FileMultiRange {
+    #[inline]
     fn from(value: std::ops::RangeInclusive<usize>) -> Self { Self(RangeSetBlaze::from_iter(value)) }
 }
 
 impl From<&[std::ops::RangeInclusive<usize>]> for FileMultiRange {
+    #[inline]
     fn from(value: &[std::ops::RangeInclusive<usize>]) -> Self { Self(RangeSetBlaze::from_iter(value)) }
 }
 
 impl From<range::RangeInclusive<usize>> for FileMultiRange {
+    #[inline]
     fn from(value: range::RangeInclusive<usize>) -> Self { (value.start..=value.last).into() }
 }
 
 impl From<FileRange> for FileMultiRange {
+    #[inline]
     fn from(value: FileRange) -> Self { value.0.into() }
 }
 
@@ -178,6 +183,7 @@ pub struct FileCursor<'a> {
 }
 
 impl<'a> FileCursor<'a> {
+    #[inline]
     pub fn into_range(self) -> FileMultiRange { self.rng }
 
     pub async fn write_all<T: IoBuf>(&mut self, buf: T) -> io::Result<()> {
@@ -201,5 +207,6 @@ impl<'a> FileCursor<'a> {
 }
 
 impl<'a> From<&'a mut File> for FileCursor<'a> {
+    #[inline]
     fn from(file: &'a mut File) -> Self { FileCursor { file, rng: FileMultiRange::default(), pos: 0 } }
 }

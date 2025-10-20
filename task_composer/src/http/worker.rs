@@ -1,4 +1,4 @@
-//! Worker 被设计为 ThreadLocal 的,只向本地的调度器汇报工作
+//! Worker 被设计为 ThreadLocal 的, 只向本地的调度器汇报工作
 use crate::{
     http::{
         file_range::{FileCursor, FileMultiRange, FileRange, IntoRangeHeader},
@@ -12,19 +12,21 @@ use compio::{
     fs::File,
     io::AsyncWriteAtExt,
     runtime::{JoinHandle, spawn},
+    time::timeout,
 };
 use compio_watch as watch;
 use cyper::Client;
-use futures_util::{FutureExt, StreamExt, TryStreamExt, select, select_biased};
+use futures_util::{FutureExt, StreamExt, TryStreamExt, select_biased};
 use identity::task::TaskId;
 use multipart_async_stream::{LendingIterator, MultipartStream};
 use smol_cancellation_token::CancellationToken;
-use std::sync::LazyLock;
+use std::{sync::LazyLock, time::Duration};
 use thiserror::Error;
+use tracing::instrument;
 use typed_builder::TypedBuilder;
 use url::Url;
 
-static GLOBAL_HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| Client::new());
+pub static GLOBAL_HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
 
 #[derive(Debug, TypedBuilder)]
 pub struct Worker {
@@ -56,6 +58,8 @@ pub enum WorkerError {
     InitiateCancel,
     #[error("recved chunk size {0} is greater than u32::MAX")]
     ChunkTooLarge(usize),
+    #[error("timeout")]
+    Timeout,
 }
 
 #[derive(Debug)]
@@ -77,7 +81,12 @@ pub type WorkerFuture = JoinHandle<WorkerResult>;
 type InnerResult = Result<FileMultiRange, WorkerError>;
 
 impl Worker {
+    const WORKER_TIMEOUT: Duration = Duration::from_secs(300);
+
+    #[instrument(skip(self), fields(id = ?self.id, range = ?self.range))]
     pub fn spawn(self) -> WorkerFuture {
+        let range = self.range.clone();
+        let id = self.id;
         let fut = async move {
             match self.range {
                 Some(ref rng) if rng.ranges_len() == 1 => self.download_continuous().await,
@@ -85,9 +94,16 @@ impl Worker {
                 None => self.download_any().await,
             }
         };
-        spawn(fut)
+        spawn(async move {
+            timeout(Self::WORKER_TIMEOUT, fut).await.unwrap_or({
+                let mut failed = WorkFailed::builder().id(id).err(Timeout).build();
+                failed.revert = range;
+                Err(failed)
+            })
+        })
     }
 
+    #[instrument(skip(file, rate_limit))]
     async fn download_any_impl(url: Url, mut file: File, rate_limit: SharedRateLimiter) -> InnerResult {
         let resp = GLOBAL_HTTP_CLIENT.get(url)?.send().await?;
         let mut body_stream = resp.bytes_stream();
@@ -107,6 +123,7 @@ impl Worker {
     /// 用于不知道目标文件大小的下载。
     /// 通常用于需要单线程下载或不知道目标大小的文件，降级到使用单个 worker 并使用 download_any 下载。
     /// 对于此函数，如果成功总是返回成功下载的 range, 如果失败则返回 None 与 错误
+    #[instrument(skip(self))]
     async fn download_any(self) -> WorkerResult {
         let cancel_err = Err(WorkFailed::builder().id(self.id).err(InitiateCancel).build());
         let handle_res = |res: InnerResult| {
@@ -123,11 +140,12 @@ impl Worker {
         }
     }
 
+    #[instrument(skip(file, rate_limit), fields(url = %url))]
     async fn download_continuous_impl(
         full: &FileMultiRange, url: Url, mut file: File, rate_limit: SharedRateLimiter,
     ) -> InnerResult {
         let start = *full.ranges().next().expect("continuous download requires a start").start() as u64;
-        let resp = GLOBAL_HTTP_CLIENT.get(url)?.header("Range", full.into_header_value().unwrap())?.send().await?;
+        let resp = GLOBAL_HTTP_CLIENT.get(url)?.header("Range", full.as_header_value().unwrap())?.send().await?;
         let mut body_stream = resp.bytes_stream();
         let mut file = FileCursor::with_position(&mut file, start);
         while let Some(body_res) = body_stream.next().await {
@@ -144,6 +162,7 @@ impl Worker {
 
     /// 用于一个连续的文件切片下载，调用此函数时假设 range 不为空
     /// 此函数成功时返回成功下载的范围，失败时返回取消提交的范围和错误
+    #[instrument(skip(self))]
     async fn download_continuous(self) -> WorkerResult {
         let full = self.range.unwrap();
         let cancel_err = Err(WorkFailed::builder().id(self.id).revert(full.clone()).err(InitiateCancel).build());
@@ -168,10 +187,11 @@ impl Worker {
         }
     }
 
+    #[instrument(skip(file, rate_limit), fields(url = %url))]
     async fn download_spare_impl(
         full: &FileMultiRange, url: Url, mut file: File, rate_limit: SharedRateLimiter,
     ) -> InnerResult {
-        let resp = GLOBAL_HTTP_CLIENT.get(url)?.header("Range", full.into_header_value().unwrap())?.send().await?;
+        let resp = GLOBAL_HTTP_CLIENT.get(url)?.header("Range", full.as_header_value().unwrap())?.send().await?;
         let boundary = resp.headers().parse_boundary()?;
         let body_stream = resp.bytes_stream();
         let mut multipart = MultipartStream::new(body_stream, &boundary);
@@ -199,12 +219,13 @@ impl Worker {
                 rate_limit.acquire(n).await?;
                 file.write_all_at(payload, cur as u64).await.0.inspect(|_| part_downloaded.insert_range(recv_rng))?;
             }
-            total_downloaded |= part_downloaded;
+            total_downloaded.union_assign(&part_downloaded);
         }
         Ok(total_downloaded)
     }
 
     /// 用于稀疏文件切片下载
+    #[instrument(skip(self))]
     async fn download_spare(self) -> WorkerResult {
         let full = self.range.unwrap();
         let cancel_err = Err(WorkFailed::builder().id(self.id).revert(full.clone()).err(InitiateCancel).build());
