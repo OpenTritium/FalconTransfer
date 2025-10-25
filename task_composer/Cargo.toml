@@ -3,10 +3,13 @@ name = "task_composer"
 version = "0.1.0"
 edition = "2024"
 
+[[bench]]
+harness = false
+name = "split_bench"
+
 [dependencies]
 arc-swap = "1.7.1"
 async-broadcast = "0.7.2"
-filesystem = { path = "../filesystem" }
 camino = { workspace = true }
 compio = { workspace = true }
 compio-watch = { git = "https://github.com/OpenTritium/compio_watch.git" }
@@ -19,6 +22,7 @@ cyper = { version = "0.5.0", default-features = false, features = [
   "stream",
 ] }
 fastdate = "0.3.36"
+filesystem = { path = "../filesystem" }
 flume = { workspace = true }
 futures-util = { workspace = true }
 governor = "0.10.1"
@@ -27,29 +31,23 @@ identity = { path = "../identity" }
 mime = { workspace = true }
 multipart_async_stream = "0.2.4"
 percent-encoding = "2.3.2"
-range-set-blaze = "0.3.0"
 regex = "1.11.2"
 sanitize-filename-reader-friendly = "2.3.0"
 smol-cancellation-token = "0.1.1"
+sparse_ranges = "0.1.4"
 thiserror = { workspace = true }
-typed-builder = { workspace = true }
-url = "2.5.7"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-btree-range-map = "0.7.2"
+typed-builder = { workspace = true }
+url = "2.5.7"
 
 [dev-dependencies]
-tempfile = { version = "3.23.0", features = ["nightly"] }
 criterion = "0.7.0"
+tempfile = { version = "3.23.0", features = ["nightly"] }
 
 [profile.dev]
-force-frame-pointers = true
+# force-frame-pointers = true
 
 [profile.release]
-force-frame-pointers = true
+# force-frame-pointers = true
 debug = true
-
-
-[[bench]]
-name = "split_bench"
-harness = false

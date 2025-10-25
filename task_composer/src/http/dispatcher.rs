@@ -2,7 +2,6 @@
 use crate::{
     http::{
         command::TaskCommand::{self, *},
-        file_range::{BlockChunks, FileMultiRange},
         meta::HttpTaskMeta,
         qos::QosAdvice,
         status::TaskStatus,
@@ -20,6 +19,7 @@ use flume as mpmc;
 use futures_util::{FutureExt, StreamExt, select, stream::FuturesUnordered};
 use identity::task::TaskId;
 use smol_cancellation_token::CancellationToken;
+use sparse_ranges::RangeSet;
 use std::{
     any::Any,
     collections::{HashMap, HashSet},
@@ -37,9 +37,9 @@ pub type JoinResult<T> = Result<T, Box<dyn Any + Send>>;
 #[derive(Debug)]
 pub struct TaskState {
     meta: Rc<HttpTaskMeta>,
-    remaining: Option<FileMultiRange>,
-    committed: FileMultiRange,
-    inflight: FileMultiRange,
+    remaining: Option<RangeSet>,
+    committed: RangeSet,
+    inflight: RangeSet,
     max_concurrency: NonZeroU8,
     current_concurrency: u8,
     retries_left: u8,
@@ -111,7 +111,7 @@ impl Dispatcher {
             Some(Ok(Ok(WorkSuccess { id, downloaded }))) => {
                 let mut task = self.tasks.get_mut(&id);
                 if let Some(ref mut task) = task {
-                    task.committed.union_assign(&downloaded); // 提交已经持久化的部分
+                    task.committed |= &downloaded; // 提交已经持久化的部分
                     task.current_concurrency -= 1; // 减少并发计数器
                     if Self::check_or_set_finished(task) {
                         self.pending_tasks.remove(&id); // 这一步是为了防呆
@@ -135,7 +135,7 @@ impl Dispatcher {
                     if let Some(revert) = revert {
                         task.inflight.difference_assign(&revert); // 取消正在下载的记录
                         if let WorkerError::ParitalDownloaded(ref mut commited) = err {
-                            task.committed.union_assign(&commited); // 部分持久化成功
+                            task.committed |= commited; // 部分持久化成功
                         }
                     }
                     // 如果遇到主动取消则设置主动取消flag，其他错误则对外呈现
@@ -296,13 +296,13 @@ impl Dispatcher {
         }
         // 如果你支持 range 那我就假定你有 content-range
         let remaining = task.remaining.as_mut().unwrap();
-        let blocks = remaining.as_block_chunks(Self::BLOCK_SIZE).unwrap().take(more_concurrency as usize);
+        let blocks = remaining.into_chunks(Self::BLOCK_SIZE).take(more_concurrency as usize);
         for blk in blocks {
             let fut = Worker::builder()
                 .id(id)
                 .url(meta.url().clone())
                 .file(task.file.clone())
-                .range(blk.clone())
+                .assign(blk.clone())
                 .child_cancel(task.cancel.child_token())
                 .rate_limit(task.rate_limit.clone())
                 .status(task.status.clone())

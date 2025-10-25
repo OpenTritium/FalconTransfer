@@ -1,7 +1,7 @@
 //! Worker 被设计为 ThreadLocal 的, 只向本地的调度器汇报工作
 use crate::{
     http::{
-        file_range::{FileCursor, FileMultiRange, FileRange, IntoRangeHeader},
+        file_cursor::FileCursor,
         header_map_ext::{HeaderMapExt, HeaderMapExtError},
         status::TaskStatus,
     },
@@ -20,6 +20,7 @@ use futures_util::{FutureExt, StreamExt, TryStreamExt, select_biased};
 use identity::task::TaskId;
 use multipart_async_stream::{LendingIterator, MultipartStream};
 use smol_cancellation_token::CancellationToken;
+use sparse_ranges::{FrozenRangeSet, Range, RangeSet};
 use std::{sync::LazyLock, time::Duration};
 use thiserror::Error;
 use tracing::instrument;
@@ -37,7 +38,7 @@ pub struct Worker {
     child_cancel: CancellationToken,
     rate_limit: SharedRateLimiter,
     #[builder(default, setter(strip_option))]
-    range: Option<FileMultiRange>,
+    assign: Option<FrozenRangeSet>,
 }
 
 #[derive(Debug, Error)]
@@ -47,7 +48,7 @@ pub enum WorkerError {
     #[error("header map process error: {0}")]
     HeaderExt(#[from] HeaderMapExtError),
     #[error("partial download range: {0:?}")]
-    ParitalDownloaded(FileMultiRange),
+    ParitalDownloaded(RangeSet),
     #[error("multipart stream error: {0}")]
     MultiPartStream(#[from] multipart_async_stream::Error),
     #[error("token bucket capacity insufficient: {0}")]
@@ -60,36 +61,41 @@ pub enum WorkerError {
     ChunkTooLarge(usize),
     #[error("timeout")]
     Timeout,
+    #[error("zero content length")]
+    ZeroContentLength,
 }
 
 #[derive(Debug)]
 pub struct WorkSuccess {
     pub id: TaskId,
-    pub downloaded: FileMultiRange,
+    pub downloaded: RangeSet,
 }
 
 #[derive(Debug, TypedBuilder)]
 pub struct WorkFailed {
     pub id: TaskId,
     #[builder(default, setter(strip_option))]
-    pub revert: Option<FileMultiRange>,
+    pub revert: Option<RangeSet>,
     pub err: WorkerError,
 }
 
 pub type WorkerResult = Result<WorkSuccess, WorkFailed>;
 pub type WorkerFuture = JoinHandle<WorkerResult>;
-type InnerResult = Result<FileMultiRange, WorkerError>;
+type InnerResult = Result<RangeSet, WorkerError>;
 
 impl Worker {
     const WORKER_TIMEOUT: Duration = Duration::from_secs(300);
 
-    #[instrument(skip(self), fields(id = ?self.id, range = ?self.range))]
+    #[instrument(skip(self), fields(id = ?self.id, range = ?self.assign))]
     pub fn spawn(self) -> WorkerFuture {
-        let range = self.range.clone();
+        let range = self.assign.clone();
         let id = self.id;
         let fut = async move {
-            match self.range {
-                Some(ref rng) if rng.ranges_len() == 1 => self.download_continuous().await,
+            match self.assign {
+                Some(ref rng) if rng.is_empty() => {
+                    Err(WorkFailed::builder().id(id).err(WorkerError::ZeroContentLength).build())
+                }
+                Some(ref rng) if rng.ranges_count() == 1 => self.download_continuous().await,
                 Some(_) => self.download_spare().await,
                 None => self.download_any().await,
             }
@@ -142,10 +148,14 @@ impl Worker {
 
     #[instrument(skip(file, rate_limit), fields(url = %url))]
     async fn download_continuous_impl(
-        full: &FileMultiRange, url: Url, mut file: File, rate_limit: SharedRateLimiter,
+        full: &RangeSet, url: Url, mut file: File, rate_limit: SharedRateLimiter,
     ) -> InnerResult {
-        let start = *full.ranges().next().expect("continuous download requires a start").start() as u64;
-        let resp = GLOBAL_HTTP_CLIENT.get(url)?.header("Range", full.as_header_value().unwrap())?.send().await?;
+        let start = full.start().expect("null start") as u64;
+        let resp = GLOBAL_HTTP_CLIENT
+            .get(url)?
+            .header("Range", full.to_http_range_header().unwrap().to_string())?
+            .send()
+            .await?;
         let mut body_stream = resp.bytes_stream();
         let mut file = FileCursor::with_position(&mut file, start);
         while let Some(body_res) = body_stream.next().await {
@@ -164,7 +174,7 @@ impl Worker {
     /// 此函数成功时返回成功下载的范围，失败时返回取消提交的范围和错误
     #[instrument(skip(self))]
     async fn download_continuous(self) -> WorkerResult {
-        let full = self.range.unwrap();
+        let full = self.assign.unwrap();
         let cancel_err = Err(WorkFailed::builder().id(self.id).revert(full.clone()).err(InitiateCancel).build());
         let handle_res = |res: InnerResult| {
             res.and_then(|downloaded| {
@@ -189,27 +199,31 @@ impl Worker {
 
     #[instrument(skip(file, rate_limit), fields(url = %url))]
     async fn download_spare_impl(
-        full: &FileMultiRange, url: Url, mut file: File, rate_limit: SharedRateLimiter,
+        full: &RangeSet, url: Url, mut file: File, rate_limit: SharedRateLimiter,
     ) -> InnerResult {
-        let resp = GLOBAL_HTTP_CLIENT.get(url)?.header("Range", full.as_header_value().unwrap())?.send().await?;
+        let resp = GLOBAL_HTTP_CLIENT
+            .get(url)?
+            .header("Range", full.to_http_range_header().unwrap().to_string())?
+            .send()
+            .await?;
         let boundary = resp.headers().parse_boundary()?;
         let body_stream = resp.bytes_stream();
         let mut multipart = MultipartStream::new(body_stream, &boundary);
-        let mut total_downloaded = FileMultiRange::default();
+        let mut total_downloaded = RangeSet::new();
         while let Some(part_res) = multipart.next().await {
             let part = part_res?;
             let hdr = part.headers();
             let (part_full, _) = hdr.parse_content_range()?;
-            if !full.is_superset_for(part_full) {
+            if !full.contains(&part_full) {
                 continue; // 如果这个 part 的范围不在被分配的范围中，则跳过
             }
             let mut body = part.body();
-            let mut part_downloaded = FileMultiRange::default();
+            let mut part_downloaded = RangeSet::new();
             while let Ok(Some(payload)) = body.try_next().await {
                 let len = payload.len();
-                let cur = part_downloaded.last().map_or(part_full.start, |n| n + 1);
-                let recv_rng: FileRange = (cur..cur + len).into();
-                if !part_full.contains(recv_rng) {
+                let cur = part_downloaded.last().map_or(part_full.start(), |n| n + 1);
+                let recv_rng = Range::new(cur, cur + len - 1);
+                if len == 0 || !part_full.contains(&recv_rng) {
                     continue; // 如果实际收到的文件范围不在头的指示中，也跳过
                 }
                 let n = {
@@ -217,9 +231,11 @@ impl Worker {
                     len.try_into().map_err(|_| ChunkTooLarge(len))?
                 };
                 rate_limit.acquire(n).await?;
-                file.write_all_at(payload, cur as u64).await.0.inspect(|_| part_downloaded.insert_range(recv_rng))?;
+                file.write_all_at(payload, cur as u64).await.0.inspect(|_| {
+                    part_downloaded.insert_range(&recv_rng);
+                })?;
             }
-            total_downloaded.union_assign(&part_downloaded);
+            total_downloaded |= &part_downloaded;
         }
         Ok(total_downloaded)
     }
@@ -227,7 +243,7 @@ impl Worker {
     /// 用于稀疏文件切片下载
     #[instrument(skip(self))]
     async fn download_spare(self) -> WorkerResult {
-        let full = self.range.unwrap();
+        let full = self.assign.unwrap();
         let cancel_err = Err(WorkFailed::builder().id(self.id).revert(full.clone()).err(InitiateCancel).build());
         let handle_res = |res: InnerResult| {
             res.and_then(|downloaded| {
@@ -264,7 +280,7 @@ mod tests {
     use url::Url;
 
     // 记得给 fd 设置非阻塞
-    fn mock_worker(rng: FileMultiRange) -> (File, Worker) {
+    fn mock_worker(rng: RangeSet) -> (File, Worker) {
         let rate_limiter = SharedRateLimiter::new_with_no_limit();
         let url = Url::parse("https://releases.ubuntu.com/24.04/ubuntu-24.04.3-desktop-amd64.iso").unwrap();
         let cancel = CancellationToken::new();
@@ -275,7 +291,7 @@ mod tests {
             .id(TaskId::new())
             .url(url)
             .file(file.clone())
-            .range(rng)
+            .assign(rng)
             .child_cancel(cancel)
             .rate_limit(rate_limiter)
             .status(tx)
@@ -285,7 +301,7 @@ mod tests {
 
     #[compio::test]
     async fn test_spare_worker() {
-        let rng: FileMultiRange = ([0..=128, 200..=296].as_slice()).into();
+        let rng: RangeSet = [Range::new(0, 128), Range::new(200, 96)].into_iter().collect();
         let (file, worker) = mock_worker(rng.clone());
         let result = worker.spawn().await.unwrap();
         assert_eq!(result.unwrap().downloaded, rng);
@@ -297,11 +313,12 @@ mod tests {
 
     #[compio::test]
     async fn test_continuous_worker() {
-        let rng: FileMultiRange = (64..=128).into();
-        let (file, worker) = mock_worker(rng.clone());
+        let mut set = RangeSet::new();
+        set.insert_range(&Range::new(64, 128));
+        let (file, worker) = mock_worker(set.clone());
         let result = worker.spawn().await.unwrap();
         println!("{:?}", result);
-        assert_eq!(result.unwrap().downloaded, rng);
+        assert_eq!(result.unwrap().downloaded, set);
         let buf = vec![];
         let BufResult(res, buf) = file.read_to_end_at(buf, 0).await;
         res.unwrap();

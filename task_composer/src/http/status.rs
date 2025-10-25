@@ -1,9 +1,11 @@
-use crate::http::{file_range::FileMultiRange, worker::WorkerError};
+use crate::http::worker::WorkerError;
+use TaskState::*;
+use sparse_ranges::RangeSet;
 
 #[derive(Debug, Default)]
 pub struct TaskStatus {
-    pub total: FileMultiRange, // 用于展示下载总量，当目标大小未知时，与已下载量同步
-    pub downloaded: FileMultiRange,
+    pub total: RangeSet, // 用于展示下载总量，当目标大小未知时，与已下载量同步
+    pub downloaded: RangeSet,
     pub state: TaskState,
     pub err: Option<WorkerError>,
 }
@@ -24,7 +26,6 @@ pub enum TaskState {
     Cancelled, // 被取消
     Failed,    //超过错误计数
 }
-use TaskState::*;
 
 impl TaskState {
     pub fn is_idle(&self) -> bool { matches!(self, Idle) }

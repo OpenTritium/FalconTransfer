@@ -5,10 +5,9 @@ use http::{
 use mime::{FromStrError, Mime};
 use percent_encoding::percent_decode_str;
 use regex::Regex;
+use sparse_ranges::Range;
 use std::sync::LazyLock;
 use thiserror::Error;
-
-use crate::http::file_range::FileRange;
 
 #[derive(Debug, Error)]
 pub enum HeaderMapExtError {
@@ -28,7 +27,7 @@ pub enum HeaderMapExtError {
 
 pub trait HeaderMapExt {
     fn parse_boundary(&self) -> Result<Box<[u8]>, HeaderMapExtError>;
-    fn parse_content_range(&self) -> Result<(FileRange, usize), HeaderMapExtError>;
+    fn parse_content_range(&self) -> Result<(Range, usize), HeaderMapExtError>;
     fn parse_filename(&self) -> Result<String, HeaderMapExtError>;
     fn parse_accept_ranges(&self) -> bool;
     fn parse_content_length(&self) -> Option<usize>;
@@ -37,8 +36,7 @@ pub trait HeaderMapExt {
 impl HeaderMapExt for HeaderMap {
     fn parse_boundary(&self) -> Result<Box<[u8]>, HeaderMapExtError> {
         use HeaderMapExtError::*;
-        let content_type =
-            self.get(CONTENT_TYPE).ok_or_else(|| FieldNotExist(CONTENT_TYPE)).and_then(|h| Ok(h.to_str()?))?;
+        let content_type = self.get(CONTENT_TYPE).ok_or(FieldNotExist(CONTENT_TYPE)).and_then(|h| Ok(h.to_str()?))?;
         let mime: Mime = content_type.parse()?;
         if mime.type_() != mime::MULTIPART {
             return Err(NotMultipart(mime));
@@ -48,10 +46,10 @@ impl HeaderMapExt for HeaderMap {
     }
 
     // 总是返回单个rng
-    fn parse_content_range(&self) -> Result<(FileRange, usize), HeaderMapExtError> {
+    fn parse_content_range(&self) -> Result<(Range, usize), HeaderMapExtError> {
         use HeaderMapExtError::*;
         let content_range =
-            self.get(CONTENT_RANGE).ok_or_else(|| FieldNotExist(CONTENT_RANGE)).and_then(|h| Ok(h.to_str()?))?;
+            self.get(CONTENT_RANGE).ok_or(FieldNotExist(CONTENT_RANGE)).and_then(|h| Ok(h.to_str()?))?;
         static REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:^bytes\s+(\d+)-(\d+)/(\d+)$)").unwrap());
         let caps =
             REGEX.captures(content_range).ok_or_else(|| FieldFormat(CONTENT_RANGE, content_range.to_string()))?;
@@ -63,9 +61,9 @@ impl HeaderMapExt for HeaderMap {
                 .map_err(|err| FieldFormat(CONTENT_RANGE, format!("raw: {}, parse int err: {:?}", content_range, err)))
         };
         let start = cap_idx(1)?;
-        let end = cap_idx(2)?;
+        let last = cap_idx(2)?;
         let total = cap_idx(3)?;
-        let rng = (start..=end).into();
+        let rng = Range::new(start, last);
         Ok((rng, total))
     }
 

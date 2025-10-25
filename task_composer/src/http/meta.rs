@@ -1,7 +1,5 @@
-use std::ops::Not;
-
 use crate::{
-    http::{file_range::FileMultiRange, header_map_ext::HeaderMapExt, worker::GLOBAL_HTTP_CLIENT},
+    http::{header_map_ext::HeaderMapExt, worker::GLOBAL_HTTP_CLIENT},
     utils::safe_filename::SafeFileName,
 };
 use camino::Utf8Path;
@@ -10,6 +8,8 @@ use fastdate::DateTime;
 use http::header::CONTENT_TYPE;
 use mime::{APPLICATION_OCTET_STREAM, Mime};
 use sanitize_filename_reader_friendly::sanitize;
+use sparse_ranges::{Range, RangeSet};
+use std::ops::Not;
 use url::Url;
 
 #[derive(Debug, Clone)]
@@ -32,16 +32,15 @@ impl HttpTaskMeta {
 
     pub fn path(&self) -> &Utf8Path { &self.name }
 
-    /// 返回 None 代表 header 未告知文件大小
-    /// 返回空 rng 代表文件大小为 0
-    pub fn content_range(&self) -> Option<FileMultiRange> {
+    /// 返回 None 代表 header 未告知文件， 返回空集合代表长度为 0
+    pub fn content_range(&self) -> Option<RangeSet> {
         let size = self.size?;
+        let mut set = RangeSet::new();
         if size == 0 {
-            return Some(FileMultiRange::default());
+            return Some(set);
         }
-        let end = size - 1;
-        let rgn = 0..=end;
-        Some(FileMultiRange::from(rgn))
+        set.insert_range(&Range::new(0, size - 1));
+        Some(set)
     }
 }
 
@@ -77,10 +76,8 @@ pub async fn fetch_meta(url: &Url) -> cyper::Result<HttpTaskMeta> {
     if let Ok(resp) = GLOBAL_HTTP_CLIENT.head(url.clone())?.send().await {
         return Ok(resp.into());
     }
-    if let Ok(resp) = GLOBAL_HTTP_CLIENT.get(url.clone())?.send().await {
-        return Ok(resp.into());
-    }
-    Err(cyper::Error::Timeout)
+    // todo 加点请求参数
+    GLOBAL_HTTP_CLIENT.get(url.clone())?.send().await.map(|resp| resp.into())
 }
 
 #[cfg(test)]
