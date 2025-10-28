@@ -68,32 +68,33 @@ pub enum WorkerError {
 #[derive(Debug)]
 pub struct WorkSuccess {
     pub id: TaskId,
-    pub downloaded: RangeSet,
+    pub downloaded: RangeSet, // 成功返回 rangeset 方便直接集合运算
 }
 
 #[derive(Debug, TypedBuilder)]
 pub struct WorkFailed {
     pub id: TaskId,
     #[builder(default, setter(strip_option))]
-    pub revert: Option<RangeSet>,
+    pub revert: Option<RangeSet>, // 失败直接返回 rangeset 方便集合运算
     pub err: WorkerError,
 }
 
-pub type WorkerResult = Result<WorkSuccess, WorkFailed>;
+pub type WorkerResult = Result<WorkSuccess, Box<WorkFailed>>;
 pub type WorkerFuture = JoinHandle<WorkerResult>;
 type InnerResult = Result<RangeSet, WorkerError>;
 
 impl Worker {
     const WORKER_TIMEOUT: Duration = Duration::from_secs(300);
 
+    /// spawn 一个任务，并且有超时时间
     #[instrument(skip(self), fields(id = ?self.id, range = ?self.assign))]
     pub fn spawn(self) -> WorkerFuture {
-        let range = self.assign.clone();
+        let assign = self.assign.clone();
         let id = self.id;
         let fut = async move {
             match self.assign {
                 Some(ref rng) if rng.is_empty() => {
-                    Err(WorkFailed::builder().id(id).err(WorkerError::ZeroContentLength).build())
+                    Err(Box::new(WorkFailed::builder().id(id).err(WorkerError::ZeroContentLength).build()))
                 }
                 Some(ref rng) if rng.ranges_count() == 1 => self.download_continuous().await,
                 Some(_) => self.download_spare().await,
@@ -101,9 +102,9 @@ impl Worker {
             }
         };
         spawn(async move {
-            timeout(Self::WORKER_TIMEOUT, fut).await.unwrap_or({
-                let mut failed = WorkFailed::builder().id(id).err(Timeout).build();
-                failed.revert = range;
+            timeout(Self::WORKER_TIMEOUT, fut).await.unwrap_or_else(|_| {
+                let mut failed = Box::new(WorkFailed::builder().id(id).err(Timeout).build());
+                failed.revert = assign.map(Into::into);
                 Err(failed)
             })
         })
@@ -112,9 +113,9 @@ impl Worker {
     #[instrument(skip(file, rate_limit))]
     async fn download_any_impl(url: Url, mut file: File, rate_limit: SharedRateLimiter) -> InnerResult {
         let resp = GLOBAL_HTTP_CLIENT.get(url)?.send().await?;
-        let mut body_stream = resp.bytes_stream();
+        let mut strm = resp.bytes_stream();
         let mut file = FileCursor::from(&mut file);
-        while let Some(body_res) = body_stream.next().await {
+        while let Some(body_res) = strm.next().await {
             let body = body_res?;
             let n = {
                 let len = body.len();
@@ -131,24 +132,25 @@ impl Worker {
     /// 对于此函数，如果成功总是返回成功下载的 range, 如果失败则返回 None 与 错误
     #[instrument(skip(self))]
     async fn download_any(self) -> WorkerResult {
-        let cancel_err = Err(WorkFailed::builder().id(self.id).err(InitiateCancel).build());
+        let cancel_err = || Err(Box::new(WorkFailed::builder().id(self.id).err(InitiateCancel).build()));
         let handle_res = |res: InnerResult| {
             res.map(|downloaded| WorkSuccess { id: self.id, downloaded })
-                .map_err(|err| WorkFailed::builder().id(self.id).err(err).build())
+                .map_err(|err| Box::new(WorkFailed::builder().id(self.id).err(err).build()))
         };
         select_biased! {
             res = Self::download_any_impl(self.url, self.file, self.rate_limit).fuse() => {
                 handle_res(res)
             }
             _ = self.child_cancel.cancelled().fuse() => {
-                cancel_err
+                cancel_err()
             }
         }
     }
 
+    /// 用于知道目标文件大小的下载实现，返回的时候需要检查范围
     #[instrument(skip(file, rate_limit), fields(url = %url))]
     async fn download_continuous_impl(
-        full: &RangeSet, url: Url, mut file: File, rate_limit: SharedRateLimiter,
+        full: &FrozenRangeSet, url: Url, mut file: File, rate_limit: SharedRateLimiter,
     ) -> InnerResult {
         let start = full.start().expect("null start") as u64;
         let resp = GLOBAL_HTTP_CLIENT
@@ -156,9 +158,9 @@ impl Worker {
             .header("Range", full.to_http_range_header().unwrap().to_string())?
             .send()
             .await?;
-        let mut body_stream = resp.bytes_stream();
+        let mut strm = resp.bytes_stream();
         let mut file = FileCursor::with_position(&mut file, start);
-        while let Some(body_res) = body_stream.next().await {
+        while let Some(body_res) = strm.next().await {
             let body = body_res?;
             let n = {
                 let len = body.len();
@@ -170,45 +172,49 @@ impl Worker {
         Ok(file.into_range())
     }
 
+    /// 稀疏和连续通用，用于检测出worker正常执行完但没有下载成功的部分
+    #[inline]
+    fn handle_ranged_result(id: TaskId, full: FrozenRangeSet, res: InnerResult) -> WorkerResult {
+        res.and_then(|downloaded| {
+            if downloaded != full {
+                Err(ParitalDownloaded(downloaded))
+            } else {
+                Ok(downloaded)
+            }
+        })
+        .map(|downloaded| WorkSuccess { id, downloaded })
+        .map_err(|err| Box::new(WorkFailed::builder().id(id).revert(full.into()).err(err).build()))
+    }
+
     /// 用于一个连续的文件切片下载，调用此函数时假设 range 不为空
     /// 此函数成功时返回成功下载的范围，失败时返回取消提交的范围和错误
     #[instrument(skip(self))]
     async fn download_continuous(self) -> WorkerResult {
         let full = self.assign.unwrap();
-        let cancel_err = Err(WorkFailed::builder().id(self.id).revert(full.clone()).err(InitiateCancel).build());
-        let handle_res = |res: InnerResult| {
-            res.and_then(|downloaded| {
-                if downloaded != full {
-                    Err(ParitalDownloaded(downloaded))
-                } else {
-                    Ok(downloaded)
-                }
-            })
-            .map(|downloaded| WorkSuccess { id: self.id, downloaded })
-            .map_err(|err| WorkFailed::builder().id(self.id).revert(full.clone()).err(err).build())
-        };
+        let cancel_err =
+            || Err(Box::new(WorkFailed::builder().id(self.id).revert(full.clone().into()).err(InitiateCancel).build()));
         select_biased! {
             res = Self::download_continuous_impl(&full, self.url, self.file, self.rate_limit).fuse() => {
-                handle_res(res)
+                Self::handle_ranged_result(self.id, full, res)
             }
             _ = self.child_cancel.cancelled().fuse() => {
-                cancel_err
+                cancel_err()
             }
         }
     }
 
     #[instrument(skip(file, rate_limit), fields(url = %url))]
     async fn download_spare_impl(
-        full: &RangeSet, url: Url, mut file: File, rate_limit: SharedRateLimiter,
+        full: &FrozenRangeSet, url: Url, mut file: File, rate_limit: SharedRateLimiter,
     ) -> InnerResult {
         let resp = GLOBAL_HTTP_CLIENT
             .get(url)?
             .header("Range", full.to_http_range_header().unwrap().to_string())?
             .send()
             .await?;
-        let boundary = resp.headers().parse_boundary()?;
-        let body_stream = resp.bytes_stream();
-        let mut multipart = MultipartStream::new(body_stream, &boundary);
+        let bnd = resp.headers().parse_boundary()?;
+        let strm = resp.bytes_stream();
+        let mut multipart = MultipartStream::new(strm, &bnd);
         let mut total_downloaded = RangeSet::new();
         while let Some(part_res) = multipart.next().await {
             let part = part_res?;
@@ -218,12 +224,15 @@ impl Worker {
                 continue; // 如果这个 part 的范围不在被分配的范围中，则跳过
             }
             let mut body = part.body();
-            let mut part_downloaded = RangeSet::new();
+            let mut partial_downloaded = RangeSet::new();
             while let Ok(Some(payload)) = body.try_next().await {
                 let len = payload.len();
-                let cur = part_downloaded.last().map_or(part_full.start(), |n| n + 1);
-                let recv_rng = Range::new(cur, cur + len - 1);
-                if len == 0 || !part_full.contains(&recv_rng) {
+                let cur = partial_downloaded.last().map_or(part_full.start(), |n| n + 1);
+                if 0 == len {
+                    continue; // 如果实际收到的文件长度为 0，也跳过
+                }
+                let recv = Range::new(cur, cur + len - 1);
+                if !part_full.contains(&recv) {
                     continue; // 如果实际收到的文件范围不在头的指示中，也跳过
                 }
                 let n = {
@@ -232,10 +241,10 @@ impl Worker {
                 };
                 rate_limit.acquire(n).await?;
                 file.write_all_at(payload, cur as u64).await.0.inspect(|_| {
-                    part_downloaded.insert_range(&recv_rng);
+                    partial_downloaded.insert_range(&recv);
                 })?;
             }
-            total_downloaded |= &part_downloaded;
+            total_downloaded |= &partial_downloaded;
         }
         Ok(total_downloaded)
     }
@@ -244,24 +253,15 @@ impl Worker {
     #[instrument(skip(self))]
     async fn download_spare(self) -> WorkerResult {
         let full = self.assign.unwrap();
-        let cancel_err = Err(WorkFailed::builder().id(self.id).revert(full.clone()).err(InitiateCancel).build());
-        let handle_res = |res: InnerResult| {
-            res.and_then(|downloaded| {
-                if downloaded != full {
-                    Err(ParitalDownloaded(downloaded))
-                } else {
-                    Ok(downloaded)
-                }
-            })
-            .map(|downloaded| WorkSuccess { id: self.id, downloaded })
-            .map_err(|err| WorkFailed::builder().id(self.id).revert(full.clone()).err(err).build())
-        };
+        let cancel_err =
+            || Err(Box::new(WorkFailed::builder().id(self.id).revert(full.clone().into()).err(InitiateCancel).build()));
+
         select_biased! {
             res = Self::download_spare_impl(&full, self.url, self.file, self.rate_limit).fuse() => {
-                handle_res(res)
+                Self::handle_ranged_result(self.id, full, res)
             }
             _ = self.child_cancel.cancelled().fuse() => {
-                cancel_err
+                cancel_err()
             }
         }
     }
@@ -272,26 +272,40 @@ mod tests {
     use super::*;
     use compio::{BufResult, io::AsyncReadAtExt};
     use compio_watch as watch;
-    use std::{
-        os::fd::{FromRawFd, IntoRawFd},
-        vec,
-    };
+    use std::vec;
     use tempfile::NamedTempFile;
     use url::Url;
+
+    fn mock_file() -> File {
+        let std_file = NamedTempFile::new().unwrap().into_file();
+        unsafe {
+            #[cfg(unix)]
+            {
+                use std::os::fd::{FromRawFd, IntoRawFd};
+                compio::fs::File::from_raw_fd(std_file.into_raw_fd())
+            }
+            #[cfg(windows)]
+            {
+                // todo 可能要设置非阻塞
+                use std::os::windows::io::{FromRawHandle, IntoRawHandle};
+                let handle = std_file.into_raw_handle();
+                compio::fs::File::from_raw_handle(handle)
+            }
+        }
+    }
 
     // 记得给 fd 设置非阻塞
     fn mock_worker(rng: RangeSet) -> (File, Worker) {
         let rate_limiter = SharedRateLimiter::new_with_no_limit();
         let url = Url::parse("https://releases.ubuntu.com/24.04/ubuntu-24.04.3-desktop-amd64.iso").unwrap();
         let cancel = CancellationToken::new();
-        let std_file = NamedTempFile::new().unwrap().into_file();
-        let file = unsafe { compio::fs::File::from_raw_fd(std_file.into_raw_fd()) };
+        let file = mock_file();
         let (tx, _rx) = watch::channel(TaskStatus::default());
         let worker = Worker::builder()
             .id(TaskId::new())
             .url(url)
             .file(file.clone())
-            .assign(rng)
+            .assign(rng.into())
             .child_cancel(cancel)
             .rate_limit(rate_limiter)
             .status(tx)
@@ -301,7 +315,7 @@ mod tests {
 
     #[compio::test]
     async fn test_spare_worker() {
-        let rng: RangeSet = [Range::new(0, 128), Range::new(200, 96)].into_iter().collect();
+        let rng: RangeSet = [Range::new(0, 128), Range::new(200, 296)].into_iter().collect();
         let (file, worker) = mock_worker(rng.clone());
         let result = worker.spawn().await.unwrap();
         assert_eq!(result.unwrap().downloaded, rng);
@@ -330,9 +344,7 @@ mod tests {
         // 使用一个较小的、已知大小的文件进行测试会更稳定和快速
         let url = Url::parse("https://www.rust-lang.org/static/images/rust-logo-blk.svg").unwrap();
         let cancel = CancellationToken::new();
-        let std_file = NamedTempFile::new().unwrap().into_file();
-        let file = unsafe { compio::fs::File::from_raw_fd(std_file.into_raw_fd()) };
-
+        let file = mock_file();
         let (tx, _rx) = watch::channel(TaskStatus::default());
         let worker = Worker::builder()
             .id(TaskId::new())

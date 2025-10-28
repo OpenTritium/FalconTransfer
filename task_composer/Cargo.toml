@@ -3,10 +3,6 @@ name = "task_composer"
 version = "0.1.0"
 edition = "2024"
 
-[[bench]]
-harness = false
-name = "split_bench"
-
 [dependencies]
 arc-swap = "1.7.1"
 async-broadcast = "0.7.2"
@@ -34,7 +30,7 @@ percent-encoding = "2.3.2"
 regex = "1.11.2"
 sanitize-filename-reader-friendly = "2.3.0"
 smol-cancellation-token = "0.1.1"
-sparse_ranges = "0.1.4"
+sparse_ranges = { git = "https://github.com/OpenTritium/sparse_ranges.git" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -45,9 +41,9 @@ url = "2.5.7"
 criterion = "0.7.0"
 tempfile = { version = "3.23.0", features = ["nightly"] }
 
-[profile.dev]
-# force-frame-pointers = true
+# [profile.dev]
+# # force-frame-pointers = true
 
-[profile.release]
-# force-frame-pointers = true
-debug = true
+# [profile.release]
+# # force-frame-pointers = true
+# debug = true

@@ -13,6 +13,7 @@ impl SharedRateLimiter {
         Self(ArcSwapOption::from_pointee(limiter).into())
     }
 
+    /// 会有一次加载原子变量的开销
     pub fn is_no_limit(&self) -> bool { self.0.load().is_none() }
 
     // 在没有限速器的时候，任意数值都可以

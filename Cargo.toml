@@ -13,8 +13,8 @@ compio = { version = "0.16.0", features = [
 flume = { version = "0.11.1", default-features = false, features = ["async"] }
 futures-util = "0.3.31"
 thiserror = "2.0.17"
-typed-builder = "0.22.0"
+typed-builder = "0.23.0"
 mime = "0.3.17"
-camino = "1.2.0"
+camino = "1.2.1"
 tracing = "0.1"
 tracing-subscriber = "0.3.0"

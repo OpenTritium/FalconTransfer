@@ -94,6 +94,10 @@ pub fn recommand_path_for_mime(mime: &Mime, file_name: &str) -> Utf8PathBuf {
 
 pub async fn assigned_writable_file(file_name: &str, mime: &Mime) -> io::Result<File> {
     let path = recommand_path_for_mime(mime, file_name);
+    // 确保父目录存在
+    if let Some(parent) = path.parent() {
+        compio::fs::create_dir_all(parent).await?;
+    }
     let file = OpenOptions::new().create_new(true).write(true).open(path).await?;
     Ok(file)
 }

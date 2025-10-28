@@ -123,7 +123,7 @@ impl Dispatcher {
                     self.spawn_many_worker(id);
                 }
             }
-            Some(Ok(Err(WorkFailed { id, revert, mut err }))) => {
+            Some(Ok(Err(box WorkFailed { id, revert, err }))) => {
                 let mut task = self.tasks.get_mut(&id);
                 let mut need_continue = false;
                 if let Some(ref mut task) = task {
@@ -134,7 +134,7 @@ impl Dispatcher {
                     // 如果有回滚的必要
                     if let Some(revert) = revert {
                         task.inflight.difference_assign(&revert); // 取消正在下载的记录
-                        if let WorkerError::ParitalDownloaded(ref mut commited) = err {
+                        if let WorkerError::ParitalDownloaded(ref commited) = err {
                             task.committed |= commited; // 部分持久化成功
                         }
                     }
@@ -309,7 +309,7 @@ impl Dispatcher {
                 .build()
                 .spawn();
             task.current_concurrency += 1; // 增加并发计数器
-            task.inflight.union_assign(&blk); // 这个块正在下载
+            task.inflight |= &blk; // 这个块正在下载
             self.workers.push(fut);
         }
     }

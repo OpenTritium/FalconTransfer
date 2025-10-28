@@ -8,7 +8,7 @@ pub struct FileCursor<'a> {
     pos: u64,
 }
 
-impl<'a> FileCursor<'a> {
+impl FileCursor<'_> {
     #[inline]
     pub fn into_range(self) -> RangeSet { self.rng }
 
@@ -25,9 +25,7 @@ impl<'a> FileCursor<'a> {
         })
     }
 
-    pub fn with_position(file: &'a mut File, pos: u64) -> FileCursor<'a> {
-        FileCursor { file, rng: RangeSet::new(), pos }
-    }
+    pub fn with_position(file: &mut File, pos: u64) -> FileCursor { FileCursor { file, rng: RangeSet::new(), pos } }
 
     pub fn range(&self) -> &RangeSet { &self.rng }
 }

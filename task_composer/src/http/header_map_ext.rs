@@ -11,23 +11,23 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum HeaderMapExtError {
-    #[error("")]
+    #[error("{0} does not exist")]
     FieldNotExist(HeaderName),
-    #[error("")]
+    #[error("invalid format for header {0}: {1}")]
     FieldFormat(HeaderName, String),
-    #[error("")]
+    #[error(transparent)]
     HeaderToStr(#[from] http::header::ToStrError),
-    #[error("")]
+    #[error(transparent)]
     InvalidMime(#[from] FromStrError),
-    #[error("")]
+    #[error("not multipart content type: {0}")]
     NotMultipart(Mime),
-    #[error("")]
+    #[error("not found boundary in mime: {0}")]
     NotFoundBoundary(Mime),
 }
 
 pub trait HeaderMapExt {
     fn parse_boundary(&self) -> Result<Box<[u8]>, HeaderMapExtError>;
-    fn parse_content_range(&self) -> Result<(Range, usize), HeaderMapExtError>;
+    fn parse_content_range(&self) -> Result<(Range, usize), HeaderMapExtError>; // range, total size
     fn parse_filename(&self) -> Result<String, HeaderMapExtError>;
     fn parse_accept_ranges(&self) -> bool;
     fn parse_content_length(&self) -> Option<usize>;
@@ -41,8 +41,8 @@ impl HeaderMapExt for HeaderMap {
         if mime.type_() != mime::MULTIPART {
             return Err(NotMultipart(mime));
         }
-        let bd = mime.get_param(mime::BOUNDARY).ok_or_else(|| NotFoundBoundary(mime.clone()))?.as_str();
-        Ok(bd.as_bytes().into())
+        let bnd = mime.get_param(mime::BOUNDARY).ok_or_else(|| NotFoundBoundary(mime.clone()))?.as_str();
+        Ok(bnd.as_bytes().into())
     }
 
     // 总是返回单个rng
