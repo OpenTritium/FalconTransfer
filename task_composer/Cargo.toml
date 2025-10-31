@@ -8,13 +8,13 @@ arc-swap = "1.7.1"
 async-broadcast = "0.7.2"
 camino = { workspace = true }
 compio = { workspace = true }
-compio-watch = { git = "https://github.com/OpenTritium/compio_watch.git" }
+see = "0.1.1"
 cyper = { version = "0.5.0", default-features = false, features = [
   "cookies",
   "http2",
   "http3",
-  "nightly",
-  "rustls",
+  # "nightly",
+  "native-tls",
   "stream",
 ] }
 fastdate = "0.3.36"
@@ -30,7 +30,7 @@ percent-encoding = "2.3.2"
 regex = "1.11.2"
 sanitize-filename-reader-friendly = "2.3.0"
 smol-cancellation-token = "0.1.1"
-sparse_ranges = { git = "https://github.com/OpenTritium/sparse_ranges.git" }
+sparse_ranges = "0.1.8"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

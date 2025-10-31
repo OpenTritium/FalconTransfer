@@ -1,3 +1,4 @@
+use HeaderMapExtError::*;
 use http::{
     HeaderMap, HeaderName,
     header::{ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE},
@@ -8,6 +9,7 @@ use regex::Regex;
 use sparse_ranges::Range;
 use std::sync::LazyLock;
 use thiserror::Error;
+use tracing::instrument;
 
 #[derive(Debug, Error)]
 pub enum HeaderMapExtError {
@@ -34,8 +36,8 @@ pub trait HeaderMapExt {
 }
 
 impl HeaderMapExt for HeaderMap {
+    #[instrument(skip_all)]
     fn parse_boundary(&self) -> Result<Box<[u8]>, HeaderMapExtError> {
-        use HeaderMapExtError::*;
         let content_type = self.get(CONTENT_TYPE).ok_or(FieldNotExist(CONTENT_TYPE)).and_then(|h| Ok(h.to_str()?))?;
         let mime: Mime = content_type.parse()?;
         if mime.type_() != mime::MULTIPART {
@@ -46,6 +48,7 @@ impl HeaderMapExt for HeaderMap {
     }
 
     // 总是返回单个rng
+    #[instrument(skip_all)]
     fn parse_content_range(&self) -> Result<(Range, usize), HeaderMapExtError> {
         use HeaderMapExtError::*;
         let content_range =
@@ -67,8 +70,8 @@ impl HeaderMapExt for HeaderMap {
         Ok((rng, total))
     }
 
+    #[instrument(skip_all)]
     fn parse_filename(&self) -> Result<String, HeaderMapExtError> {
-        use HeaderMapExtError::*;
         let content_disposition = self
             .get(CONTENT_DISPOSITION)
             .ok_or_else(|| FieldNotExist(CONTENT_DISPOSITION))

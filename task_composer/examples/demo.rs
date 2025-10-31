@@ -1,9 +1,9 @@
+use std::time::Duration;
+
 use async_broadcast as broadcast;
-use compio::runtime::spawn;
-use compio_watch as watch;
-use filesystem::USER_DIR;
+use compio::{runtime::spawn, time::sleep};
 use flume as mpmc;
-use std::sync::LazyLock;
+use see::sync as watch;
 use task_composer::{Dispatcher, TaskCommand, TaskStatus, fetch_meta};
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
@@ -11,7 +11,9 @@ use url::Url;
 
 #[compio::main]
 async fn main() {
-    let subscriber = FmtSubscriber::builder().with_max_level(Level::DEBUG).finish();
+    let subscriber = FmtSubscriber::builder()
+            .with_max_level(Level::DEBUG) // 捕获 DEBUG 及更高级别的日志
+            .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
     let (cmd_tx, cmd_rx) = mpmc::unbounded();
     let (_qos_tx, qos_rx) = broadcast::broadcast(1);
@@ -22,9 +24,6 @@ async fn main() {
     let (status_tx, status_rx) = watch::channel(TaskStatus::default());
     let cmd = TaskCommand::Create { meta, watch: status_tx.into() };
     cmd_tx.send_async(cmd).await.unwrap();
-    println!("Initial status: {:?}", status_rx.borrow());
-    loop {
-        status_rx.changed().await.unwrap();
-        println!("Updated status: {:?}", status_rx.borrow());
-    }
+
+    sleep(Duration::from_hours(1)).await;
 }

@@ -14,11 +14,11 @@ use compio::{
     runtime::{JoinHandle, spawn},
     time::timeout,
 };
-use compio_watch as watch;
 use cyper::Client;
 use futures_util::{FutureExt, StreamExt, TryStreamExt, select_biased};
 use identity::task::TaskId;
 use multipart_async_stream::{LendingIterator, MultipartStream};
+use see::sync as watch;
 use smol_cancellation_token::CancellationToken;
 use sparse_ranges::{FrozenRangeSet, Range, RangeSet};
 use std::{sync::LazyLock, time::Duration};
@@ -68,14 +68,14 @@ pub enum WorkerError {
 #[derive(Debug)]
 pub struct WorkSuccess {
     pub id: TaskId,
-    pub downloaded: RangeSet, // 成功返回 rangeset 方便直接集合运算
+    pub downloaded: RangeSet,
 }
 
 #[derive(Debug, TypedBuilder)]
 pub struct WorkFailed {
     pub id: TaskId,
     #[builder(default, setter(strip_option))]
-    pub revert: Option<RangeSet>, // 失败直接返回 rangeset 方便集合运算
+    pub revert: Option<RangeSet>,
     pub err: WorkerError,
 }
 
@@ -84,9 +84,8 @@ pub type WorkerFuture = JoinHandle<WorkerResult>;
 type InnerResult = Result<RangeSet, WorkerError>;
 
 impl Worker {
-    const WORKER_TIMEOUT: Duration = Duration::from_secs(300);
+    const WORKER_TIMEOUT: Duration = Duration::from_mins(3);
 
-    /// spawn 一个任务，并且有超时时间
     #[instrument(skip(self), fields(id = ?self.id, range = ?self.assign))]
     pub fn spawn(self) -> WorkerFuture {
         let assign = self.assign.clone();
@@ -102,19 +101,24 @@ impl Worker {
             }
         };
         spawn(async move {
-            timeout(Self::WORKER_TIMEOUT, fut).await.unwrap_or_else(|_| {
-                let mut failed = Box::new(WorkFailed::builder().id(id).err(Timeout).build());
-                failed.revert = assign.map(Into::into);
-                Err(failed)
-            })
+            // timeout(Self::WORKER_TIMEOUT, fut).await.unwrap_or_else(|_| {
+            //     let mut failed = Box::new(WorkFailed::builder().id(id).err(Timeout).build());
+            //     failed.revert = assign.map(Into::into);
+            //     Err(failed)
+            // })
+            fut.await
         })
     }
 
-    #[instrument(skip(file, rate_limit))]
-    async fn download_any_impl(url: Url, mut file: File, rate_limit: SharedRateLimiter) -> InnerResult {
+    #[instrument(skip_all)]
+    async fn download_any_impl(
+        url: Url, mut file: File, rate_limit: SharedRateLimiter, status: watch::Sender<TaskStatus>,
+    ) -> InnerResult {
+        let span = tracing::span!(tracing::Level::INFO, "download_any_impl", url = %url);
         let resp = GLOBAL_HTTP_CLIENT.get(url)?.send().await?;
         let mut strm = resp.bytes_stream();
         let mut file = FileCursor::from(&mut file);
+        let guard = span.entered();
         while let Some(body_res) = strm.next().await {
             let body = body_res?;
             let n = {
@@ -123,14 +127,16 @@ impl Worker {
             };
             rate_limit.acquire(n).await?;
             file.write_all(body).await?;
+            status.send_modify(|s| s.downloaded |= file.range());
         }
+        guard.exit();
         Ok(file.into_range())
     }
 
     /// 用于不知道目标文件大小的下载。
     /// 通常用于需要单线程下载或不知道目标大小的文件，降级到使用单个 worker 并使用 download_any 下载。
     /// 对于此函数，如果成功总是返回成功下载的 range, 如果失败则返回 None 与 错误
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     async fn download_any(self) -> WorkerResult {
         let cancel_err = || Err(Box::new(WorkFailed::builder().id(self.id).err(InitiateCancel).build()));
         let handle_res = |res: InnerResult| {
@@ -138,7 +144,7 @@ impl Worker {
                 .map_err(|err| Box::new(WorkFailed::builder().id(self.id).err(err).build()))
         };
         select_biased! {
-            res = Self::download_any_impl(self.url, self.file, self.rate_limit).fuse() => {
+            res = Self::download_any_impl(self.url, self.file, self.rate_limit, self.status).fuse() => {
                 handle_res(res)
             }
             _ = self.child_cancel.cancelled().fuse() => {
@@ -148,9 +154,10 @@ impl Worker {
     }
 
     /// 用于知道目标文件大小的下载实现，返回的时候需要检查范围
-    #[instrument(skip(file, rate_limit), fields(url = %url))]
+    #[instrument(skip_all)]
     async fn download_continuous_impl(
         full: &FrozenRangeSet, url: Url, mut file: File, rate_limit: SharedRateLimiter,
+        status: watch::Sender<TaskStatus>,
     ) -> InnerResult {
         let start = full.start().expect("null start") as u64;
         let resp = GLOBAL_HTTP_CLIENT
@@ -168,12 +175,13 @@ impl Worker {
             };
             rate_limit.acquire(n).await?;
             file.write_all(body).await?;
+            status.send_modify(|s| s.downloaded |= file.range());
         }
         Ok(file.into_range())
     }
 
     /// 稀疏和连续通用，用于检测出worker正常执行完但没有下载成功的部分
-    #[inline]
+    #[instrument(skip_all)]
     fn handle_ranged_result(id: TaskId, full: FrozenRangeSet, res: InnerResult) -> WorkerResult {
         res.and_then(|downloaded| {
             if downloaded != full {
@@ -188,13 +196,13 @@ impl Worker {
 
     /// 用于一个连续的文件切片下载，调用此函数时假设 range 不为空
     /// 此函数成功时返回成功下载的范围，失败时返回取消提交的范围和错误
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     async fn download_continuous(self) -> WorkerResult {
         let full = self.assign.unwrap();
         let cancel_err =
             || Err(Box::new(WorkFailed::builder().id(self.id).revert(full.clone().into()).err(InitiateCancel).build()));
         select_biased! {
-            res = Self::download_continuous_impl(&full, self.url, self.file, self.rate_limit).fuse() => {
+            res = Self::download_continuous_impl(&full, self.url, self.file, self.rate_limit, self.status).fuse() => {
                 Self::handle_ranged_result(self.id, full, res)
             }
             _ = self.child_cancel.cancelled().fuse() => {
@@ -203,9 +211,10 @@ impl Worker {
         }
     }
 
-    #[instrument(skip(file, rate_limit), fields(url = %url))]
+    #[instrument(skip_all)]
     async fn download_spare_impl(
         full: &FrozenRangeSet, url: Url, mut file: File, rate_limit: SharedRateLimiter,
+        status: watch::Sender<TaskStatus>,
     ) -> InnerResult {
         let resp = GLOBAL_HTTP_CLIENT
             .get(url)?
@@ -243,6 +252,7 @@ impl Worker {
                 file.write_all_at(payload, cur as u64).await.0.inspect(|_| {
                     partial_downloaded.insert_range(&recv);
                 })?;
+                status.send_modify(|s| s.downloaded |= &partial_downloaded);
             }
             total_downloaded |= &partial_downloaded;
         }
@@ -250,14 +260,14 @@ impl Worker {
     }
 
     /// 用于稀疏文件切片下载
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     async fn download_spare(self) -> WorkerResult {
         let full = self.assign.unwrap();
         let cancel_err =
             || Err(Box::new(WorkFailed::builder().id(self.id).revert(full.clone().into()).err(InitiateCancel).build()));
 
         select_biased! {
-            res = Self::download_spare_impl(&full, self.url, self.file, self.rate_limit).fuse() => {
+            res = Self::download_spare_impl(&full, self.url, self.file, self.rate_limit,self.status).fuse() => {
                 Self::handle_ranged_result(self.id, full, res)
             }
             _ = self.child_cancel.cancelled().fuse() => {
@@ -271,7 +281,7 @@ impl Worker {
 mod tests {
     use super::*;
     use compio::{BufResult, io::AsyncReadAtExt};
-    use compio_watch as watch;
+    use see::sync as watch;
     use std::vec;
     use tempfile::NamedTempFile;
     use url::Url;

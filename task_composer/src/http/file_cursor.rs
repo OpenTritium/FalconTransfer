@@ -1,6 +1,7 @@
 use compio::{buf::IoBuf, fs::File, io::AsyncWriteAtExt};
 use sparse_ranges::{Range, RangeSet};
 use std::io;
+use tracing::instrument;
 
 pub struct FileCursor<'a> {
     file: &'a mut File,
@@ -12,6 +13,7 @@ impl FileCursor<'_> {
     #[inline]
     pub fn into_range(self) -> RangeSet { self.rng }
 
+    #[instrument(skip_all)]
     pub async fn write_all<T: IoBuf>(&mut self, buf: T) -> io::Result<()> {
         let len = buf.buf_len();
         let result = self.file.write_all_at(buf, self.pos).await.0;
@@ -25,7 +27,9 @@ impl FileCursor<'_> {
         })
     }
 
-    pub fn with_position(file: &mut File, pos: u64) -> FileCursor { FileCursor { file, rng: RangeSet::new(), pos } }
+    pub fn with_position(file: &'_ mut File, pos: u64) -> FileCursor<'_> {
+        FileCursor { file, rng: RangeSet::new(), pos }
+    }
 
     pub fn range(&self) -> &RangeSet { &self.rng }
 }

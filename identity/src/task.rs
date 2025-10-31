@@ -1,7 +1,11 @@
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::{
+    fmt::Debug,
+    sync::atomic::{AtomicU64, Ordering::Relaxed},
+};
+
 static GLOBAL_TASK_ID: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 pub struct TaskId(u64);
 
 impl TaskId {
@@ -10,4 +14,8 @@ impl TaskId {
 
 impl Default for TaskId {
     fn default() -> Self { Self::new() }
+}
+
+impl Debug for TaskId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}", self.0) }
 }

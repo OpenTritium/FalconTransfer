@@ -1,7 +1,10 @@
 use crate::http::{meta::HttpTaskMeta, status::TaskStatus};
-use compio_watch as watch;
 use identity::task::TaskId;
-use std::num::{NonZeroU8, NonZeroU32};
+use see::sync as watch;
+use std::{
+    fmt::Debug,
+    num::{NonZeroU8, NonZeroU32},
+};
 
 #[derive(Debug, Clone)]
 pub enum TaskCommand {
