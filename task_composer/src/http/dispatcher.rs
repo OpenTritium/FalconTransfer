@@ -15,7 +15,7 @@ use compio::{
     runtime::{JoinHandle, spawn},
 };
 use flume as mpmc;
-use futures_util::{FutureExt, StreamExt, select, stream::FuturesUnordered};
+use futures_util::{StreamExt, select, stream::FuturesUnordered};
 use identity::task::TaskId;
 use see::sync as watch;
 use smol_cancellation_token::CancellationToken;
@@ -23,7 +23,6 @@ use sparse_ranges::RangeSet;
 use std::{
     any::Any,
     collections::{HashMap, HashSet},
-    future::pending,
     num::NonZeroU8,
     ops::Not,
     rc::Rc,
@@ -42,7 +41,7 @@ pub struct TaskState {
     max_concurrency: NonZeroU8,
     current_concurrency: u8,
     retries_left: u8,
-    file: File,
+    file: Option<File>,
     cancel: CancellationToken,
     status: watch::Sender<TaskStatus>,
     rate_limit: SharedRateLimiter,
@@ -103,6 +102,13 @@ impl Dispatcher {
 
     #[instrument(skip_all)]
     async fn handle_worker_res(&mut self, worker_res: Option<JoinResult<WorkerResult>>) {
+        async fn dispose(file: &mut Option<File>) {
+            if let Some(file) = file.take() {
+                let _ = file.sync_all().await.inspect_err(|err| error!("failed sync file {err:?}"));
+                let _ = file.close().await.inspect_err(|err| error!("failed close file {err:?}"));
+            }
+        }
+
         match worker_res {
             Some(Ok(Ok(WorkSuccess { id, downloaded }))) => {
                 info!("task {id:?} finished {downloaded:?}");
@@ -112,7 +118,8 @@ impl Dispatcher {
                     task.committed |= &downloaded; // 提交已经持久化的部分
                     task.current_concurrency -= 1; // 减少并发计数器
                     if Self::check_or_set_finished(task) {
-                        task.file.sync_all().await.expect("failed sync to disk");
+                        dispose(&mut task.file).await;
+                        info!("task {id:?} finished");
                         // 记得关闭文件句柄
                         self.pending_tasks.remove(&id); // 这一步是为了防呆
                         return;
@@ -155,16 +162,23 @@ impl Dispatcher {
                         });
                     }
                     if Self::check_or_set_finished(task) {
+                        dispose(&mut task.file).await;
+                        info!("task {id:?} finished");
                         self.pending_tasks.remove(&id); // 这一步是为了防呆
                         return;
                     }
+                    if !need_continue {
+                        dispose(&mut task.file).await;
+                        info!("task {id:?} closed because of err count exceeds max retries");
+                    }
                 }
+
                 if self.pending_tasks.contains(&id).not() && need_continue {
                     self.spawn_many_worker(id);
                 }
             }
             Some(Err(err)) => {
-                error!("worker join error: {:?}", err);
+                error!("worker join error: {err:?}");
             }
             None => {
                 error!("worker join handle closed unexpectedly");
@@ -196,6 +210,7 @@ impl Dispatcher {
                 }
             }
             Ok(Resume(ref id)) => {
+                info!("resume task {id:?}");
                 self.pending_tasks.remove(id); // 如果是被暂停的，那就从暂停名单中移除一下
                 if let Some(task) = self.tasks.get_mut(id) {
                     task.retries_left = Self::DEFAULT_MAX_RETRIES; // 可能是因为尝试次数耗尽导致停止的,所以恢复一下
@@ -244,13 +259,16 @@ impl Dispatcher {
     #[instrument(skip_all)]
     fn push_task(&mut self, meta: HttpTaskMeta, tx: watch::Sender<TaskStatus>, file: File) -> TaskId {
         let total = meta.content_range();
+        if let Some(ref total) = total {
+            tx.send_modify(|status| status.total = total.clone());
+        }
         let task_state = TaskState {
             meta: meta.into(),
             inflight: Default::default(),
             max_concurrency: Self::DEAFULT_MAX_CONCURRENCY,
             current_concurrency: 0,
             retries_left: Self::DEFAULT_MAX_RETRIES,
-            file,
+            file: file.into(),
             cancel: CancellationToken::new(),
             status: tx,
             rate_limit: SharedRateLimiter::new_with_no_limit(),
@@ -268,6 +286,10 @@ impl Dispatcher {
         let Some(task) = self.tasks.get_mut(&id) else {
             return;
         };
+        if task.file.is_none() {
+            // 此时有 worker 关闭了文件句柄，就不要继续催动工作者了
+            return;
+        }
         let meta = task.meta.as_ref();
         let is_single = meta.is_support_ranges().not();
         // 如果只支持单线程且当前有一个工作者，则直接返回
@@ -276,10 +298,11 @@ impl Dispatcher {
         }
         // 如果仅支持单线程且当前没有工作者，则创建一个工作者
         if is_single {
+            let _ = task.status.send_if_modified(|status| status.state.set_running());
             let fut = Worker::builder()
                 .id(id)
                 .url(meta.url().clone())
-                .file(task.file.clone())
+                .file(task.file.clone().unwrap())
                 .child_cancel(task.cancel.child_token())
                 .rate_limit(task.rate_limit.clone())
                 .status(task.status.clone())
@@ -296,6 +319,7 @@ impl Dispatcher {
         if more_concurrency == 0 {
             return;
         }
+        let _ = task.status.send_if_modified(|status| status.state.set_running());
         // 如果你支持 range 那我就假定你有 content-range
         let remaining = task.remaining.as_mut().unwrap();
         let blocks = remaining.into_chunks(Self::BLOCK_SIZE).take(more_concurrency as usize);
@@ -303,7 +327,7 @@ impl Dispatcher {
             let fut = Worker::builder()
                 .id(id)
                 .url(meta.url().clone())
-                .file(task.file.clone())
+                .file(task.file.clone().unwrap())
                 .assign(blk.clone())
                 .child_cancel(task.cancel.child_token())
                 .rate_limit(task.rate_limit.clone())
@@ -315,36 +339,5 @@ impl Dispatcher {
             self.workers.push(fut);
             info!("spawn multi worker for task {id:?} with range {blk:?}");
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::*;
-    use crate::http::{meta::fetch_meta, status};
-    use compio::time::sleep;
-    use tracing::Level;
-    use tracing_subscriber::FmtSubscriber;
-    use url::Url;
-
-    #[compio::test]
-    async fn test_dispatcher() {
-        let subscriber = FmtSubscriber::builder()
-            .with_max_level(Level::DEBUG) // 捕获 DEBUG 及更高级别的日志
-            .finish();
-        tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-        let (cmd_tx, cmd_rx) = mpmc::unbounded();
-        let (_qos_tx, qos_rx) = broadcast::broadcast(1);
-        let dispatcher = Dispatcher::builder().cmd(cmd_rx).qos(qos_rx).build();
-        spawn(async move { dispatcher.spawn().await }).detach();
-        let url = Url::parse("https://releases.ubuntu.com/24.04/ubuntu-24.04.3-desktop-amd64.iso").unwrap();
-        let meta = Box::new(fetch_meta(&url).await.unwrap());
-        let (status_tx, status_rx) = watch::channel(TaskStatus::default());
-        let cmd = TaskCommand::Create { meta, watch: status_tx.into() };
-        cmd_tx.send_async(cmd).await.unwrap();
-
-        sleep(Duration::from_hours(1)).await;
     }
 }

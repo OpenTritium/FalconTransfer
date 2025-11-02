@@ -101,12 +101,11 @@ impl Worker {
             }
         };
         spawn(async move {
-            // timeout(Self::WORKER_TIMEOUT, fut).await.unwrap_or_else(|_| {
-            //     let mut failed = Box::new(WorkFailed::builder().id(id).err(Timeout).build());
-            //     failed.revert = assign.map(Into::into);
-            //     Err(failed)
-            // })
-            fut.await
+            timeout(Self::WORKER_TIMEOUT, fut).await.unwrap_or_else(|_| {
+                let mut failed = Box::new(WorkFailed::builder().id(id).err(Timeout).build());
+                failed.revert = assign.map(Into::into);
+                Err(failed)
+            })
         })
     }
 
