@@ -1,10 +1,10 @@
 [package]
-name = "identity"
+name = "native_port"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bs58 = "0.5.1"
-thiserror = { workspace = true }
-uuid = { version = "1.18.1", features = ["v7"] }
 serde = { version = "1.0.228", features = ["serde_derive"] }
+serde_json = "1.0.145"
+compio = { workspace = true }
+identity = { path = "../identity" }

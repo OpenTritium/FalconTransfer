@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::{
     fmt::Debug,
     sync::atomic::{AtomicU64, Ordering::Relaxed},
@@ -5,7 +6,7 @@ use std::{
 
 static GLOBAL_TASK_ID: AtomicU64 = AtomicU64::new(0);
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, Serialize, Deserialize)]
 pub struct TaskId(u64);
 
 impl TaskId {

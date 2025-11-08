@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["discovery", "filesystem", "identity", "task_composer"]
+members = [
+  "native_port",
+  "discovery",
+  "filesystem",
+  "identity",
+  "task_composer",
+]
 
 [workspace.dependencies]
 compio = { version = "0.16.0", features = [

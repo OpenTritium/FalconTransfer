@@ -9,7 +9,7 @@ async-broadcast = "0.7.2"
 camino = { workspace = true }
 compio = { workspace = true }
 see = "0.1.1"
-cyper = { version = "0.5.0", default-features = false, features = [
+cyper = { version = "0.6.2", default-features = false, features = [
   "cookies",
   "http2",
   "http3",

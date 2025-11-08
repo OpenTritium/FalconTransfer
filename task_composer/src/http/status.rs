@@ -4,7 +4,7 @@ use sparse_ranges::RangeSet;
 
 #[derive(Debug, Default)]
 pub struct TaskStatus {
-    pub total: RangeSet, // 用于展示下载总量，当目标大小未知时，与已下载量同步
+    pub total: Option<usize>,
     pub downloaded: RangeSet,
     pub state: TaskState,
     pub err: Option<WorkerError>,
@@ -21,8 +21,8 @@ pub enum TaskState {
     #[default]
     Idle, // 空闲，刚创建好但是没有worker 的状态
     Running,   // 运行中
-    Pending,   // 已暂停
-    Finished,  // 正常完成
+    Paused,    // 已暂停
+    Completed, // 正常完成
     Cancelled, // 被取消
     Failed,    //超过错误计数
 }
@@ -32,16 +32,16 @@ impl TaskState {
 
     pub fn is_running(&self) -> bool { matches!(self, Running) }
 
-    pub fn is_pending(&self) -> bool { matches!(self, Pending) }
+    pub fn was_paused(&self) -> bool { matches!(self, Paused) }
 
-    pub fn is_finished(&self) -> bool { matches!(self, Finished) }
+    pub fn was_completed(&self) -> bool { matches!(self, Completed) }
 
-    pub fn is_cancelled(&self) -> bool { matches!(self, Cancelled) }
+    pub fn was_cancelled(&self) -> bool { matches!(self, Cancelled) }
 
-    pub fn is_failed(&self) -> bool { matches!(self, Failed) }
+    pub fn was_failed(&self) -> bool { matches!(self, Failed) }
 
     /// 任务完成，取消或失败
-    pub fn is_terminal(&self) -> bool { matches!(self, Finished | Cancelled | Failed) }
+    pub fn is_terminal(&self) -> bool { matches!(self, Completed | Cancelled | Failed) }
 
     pub fn set_idle(&mut self) -> bool {
         if self.is_idle() {
@@ -62,25 +62,25 @@ impl TaskState {
     }
 
     pub fn set_pending(&mut self) -> bool {
-        if self.is_pending() {
+        if self.was_paused() {
             false
         } else {
-            *self = Pending;
+            *self = Paused;
             true
         }
     }
 
     pub fn set_finished(&mut self) -> bool {
-        if self.is_finished() {
+        if self.was_completed() {
             false
         } else {
-            *self = Finished;
+            *self = Completed;
             true
         }
     }
 
     pub fn set_cancelled(&mut self) -> bool {
-        if self.is_cancelled() {
+        if self.was_cancelled() {
             false
         } else {
             *self = Cancelled;
@@ -89,7 +89,7 @@ impl TaskState {
     }
 
     pub fn set_failed(&mut self) -> bool {
-        if self.is_failed() {
+        if self.was_failed() {
             false
         } else {
             *self = Failed;

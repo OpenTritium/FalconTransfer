@@ -56,13 +56,13 @@ pub struct Dispatcher {
     #[builder(default)]
     workers: FuturesUnordered<WorkerFuture>,
     #[builder(default)]
-    pending_tasks: HashSet<TaskId>,
+    pendings: HashSet<TaskId>,
 }
 
 impl Dispatcher {
     const BLOCK_SIZE: usize = 0x100_0000;
     const DEAFULT_MAX_CONCURRENCY: NonZeroU8 = NonZeroU8::new(8).unwrap();
-    const DEFAULT_MAX_RETRIES: u8 = 3;
+    const DEFAULT_MAX_RETRIES: u8 = 5;
 
     #[instrument(skip_all)]
     pub fn spawn(mut self) -> JoinHandle<()> {
@@ -121,12 +121,12 @@ impl Dispatcher {
                         dispose(&mut task.file).await;
                         info!("task {id:?} finished");
                         // 记得关闭文件句柄
-                        self.pending_tasks.remove(&id); // 这一步是为了防呆
+                        self.pendings.remove(&id); // 这一步是为了防呆
                         return;
                     }
                 }
                 // 如果暂停列表没有它,继续产生工作者
-                if !self.pending_tasks.contains(&id) {
+                if !self.pendings.contains(&id) {
                     self.spawn_many_worker(id);
                 }
             }
@@ -164,7 +164,7 @@ impl Dispatcher {
                     if Self::check_or_set_finished(task) {
                         dispose(&mut task.file).await;
                         info!("task {id:?} finished");
-                        self.pending_tasks.remove(&id); // 这一步是为了防呆
+                        self.pendings.remove(&id); // 这一步是为了防呆
                         return;
                     }
                     if !need_continue {
@@ -173,7 +173,7 @@ impl Dispatcher {
                     }
                 }
 
-                if self.pending_tasks.contains(&id).not() && need_continue {
+                if self.pendings.contains(&id).not() && need_continue {
                     self.spawn_many_worker(id);
                 }
             }
@@ -203,7 +203,7 @@ impl Dispatcher {
             }
             Ok(Pause(ref id)) => {
                 info!("pause task {id:?}");
-                self.pending_tasks.insert(*id); // 不要继续创建新工作者了
+                self.pendings.insert(*id); // 不要继续创建新工作者了
                 if let Some(task) = self.tasks.get_mut(id) {
                     task.cancel.cancel(); // 取消现有工作者
                     let _ = task.status.send_if_modified(|status| status.state.set_pending()); // 修改对外状态
@@ -211,7 +211,7 @@ impl Dispatcher {
             }
             Ok(Resume(ref id)) => {
                 info!("resume task {id:?}");
-                self.pending_tasks.remove(id); // 如果是被暂停的，那就从暂停名单中移除一下
+                self.pendings.remove(id); // 如果是被暂停的，那就从暂停名单中移除一下
                 if let Some(task) = self.tasks.get_mut(id) {
                     task.retries_left = Self::DEFAULT_MAX_RETRIES; // 可能是因为尝试次数耗尽导致停止的,所以恢复一下
                     let _ = task.status.send_if_modified(|status| status.state.set_running()); // 恢复一下对外界的状态
@@ -231,7 +231,7 @@ impl Dispatcher {
                     }
                 }
                 // 切忌不要立刻移除任务，我们要确保外界观测到任务被取消状态
-                self.pending_tasks.remove(id); // 保护性清理，防止后续同 ID 任务一创建就被暂停
+                self.pendings.remove(id); // 保护性清理，防止后续同 ID 任务一创建就被暂停
             }
             Ok(Remove(ref id)) => {
                 info!("remove task {id:?}");
@@ -239,7 +239,7 @@ impl Dispatcher {
                     self.tasks.get(id).map(|task| task.status.borrow().state.is_terminal()).unwrap_or(false);
                 if need_remove {
                     self.tasks.remove(id); // 外界已经观察到任务被取消或完成了，批准我们删除任务了，外界观察该任务的唯一通道也会被移除
-                    self.pending_tasks.remove(id); // 保护性清理
+                    self.pendings.remove(id); // 保护性清理
                 }
             }
             // 总是从新元数据创建新文件，后面设计一个指定文件并恢复进度的
@@ -260,7 +260,7 @@ impl Dispatcher {
     fn push_task(&mut self, meta: HttpTaskMeta, tx: watch::Sender<TaskStatus>, file: File) -> TaskId {
         let total = meta.content_range();
         if let Some(ref total) = total {
-            tx.send_modify(|status| status.total = total.clone());
+            tx.send_modify(|status| status.total = total.last());
         }
         let task_state = TaskState {
             meta: meta.into(),

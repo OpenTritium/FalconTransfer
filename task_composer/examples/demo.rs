@@ -11,10 +11,10 @@ use url::Url;
 
 #[compio::main]
 async fn main() {
-    // let subscriber = FmtSubscriber::builder()
-    //         .with_max_level(Level::DEBUG) // 捕获 DEBUG 及更高级别的日志
-    //         .finish();
-    // tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    let subscriber = FmtSubscriber::builder()
+            .with_max_level(Level::DEBUG) // 捕获 DEBUG 及更高级别的日志
+            .finish();
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
     let (cmd_tx, cmd_rx) = mpmc::unbounded();
     let (_qos_tx, qos_rx) = broadcast::broadcast(1);
     let dispatcher = Dispatcher::builder().cmd(cmd_rx).qos(qos_rx).build();
