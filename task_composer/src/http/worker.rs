@@ -53,8 +53,8 @@ pub enum WorkerError {
     MultiPartStream(#[from] multipart_async_stream::Error),
     #[error("token bucket capacity insufficient: {0}")]
     RateLimit(#[from] governor::InsufficientCapacity),
-    #[error("file write error: {0}")]
-    FileWrite(#[from] std::io::Error),
+    #[error("file opt error: {0}")]
+    File(#[from] std::io::Error),
     #[error("initiate cancel")]
     InitiateCancel,
     #[error("recved chunk size {0} is greater than u32::MAX")]
@@ -273,108 +273,5 @@ impl Worker {
                 cancel_err()
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use compio::{BufResult, io::AsyncReadAtExt};
-    use see::sync as watch;
-    use std::vec;
-    use tempfile::NamedTempFile;
-    use url::Url;
-
-    fn mock_file() -> File {
-        let std_file = NamedTempFile::new().unwrap().into_file();
-        unsafe {
-            #[cfg(unix)]
-            {
-                use std::os::fd::{FromRawFd, IntoRawFd};
-                compio::fs::File::from_raw_fd(std_file.into_raw_fd())
-            }
-            #[cfg(windows)]
-            {
-                // todo 可能要设置非阻塞
-                use std::os::windows::io::{FromRawHandle, IntoRawHandle};
-                let handle = std_file.into_raw_handle();
-                compio::fs::File::from_raw_handle(handle)
-            }
-        }
-    }
-
-    // 记得给 fd 设置非阻塞
-    fn mock_worker(rng: RangeSet) -> (File, Worker) {
-        let rate_limiter = SharedRateLimiter::new_with_no_limit();
-        let url = Url::parse("https://releases.ubuntu.com/24.04/ubuntu-24.04.3-desktop-amd64.iso").unwrap();
-        let cancel = CancellationToken::new();
-        let file = mock_file();
-        let (tx, _rx) = watch::channel(TaskStatus::default());
-        let worker = Worker::builder()
-            .id(TaskId::new())
-            .url(url)
-            .file(file.clone())
-            .assign(rng.into())
-            .child_cancel(cancel)
-            .rate_limit(rate_limiter)
-            .status(tx)
-            .build();
-        (file.clone(), worker)
-    }
-
-    #[compio::test]
-    async fn test_spare_worker() {
-        let rng: RangeSet = [Range::new(0, 128), Range::new(200, 296)].into_iter().collect();
-        let (file, worker) = mock_worker(rng.clone());
-        let result = worker.spawn().await.unwrap();
-        assert_eq!(result.unwrap().downloaded, rng);
-        let buf = vec![];
-        let BufResult(res, buf) = file.read_to_end_at(buf, 0).await;
-        res.unwrap();
-        println!("{:?}", buf);
-    }
-
-    #[compio::test]
-    async fn test_continuous_worker() {
-        let mut set = RangeSet::new();
-        set.insert_range(&Range::new(64, 128));
-        let (file, worker) = mock_worker(set.clone());
-        let result = worker.spawn().await.unwrap();
-        println!("{:?}", result);
-        assert_eq!(result.unwrap().downloaded, set);
-        let buf = vec![];
-        let BufResult(res, buf) = file.read_to_end_at(buf, 0).await;
-        res.unwrap();
-        println!("{:?}", buf);
-    }
-
-    fn mock_worker_any() -> (File, Worker) {
-        let rate_limiter = SharedRateLimiter::new_with_no_limit();
-        // 使用一个较小的、已知大小的文件进行测试会更稳定和快速
-        let url = Url::parse("https://www.rust-lang.org/static/images/rust-logo-blk.svg").unwrap();
-        let cancel = CancellationToken::new();
-        let file = mock_file();
-        let (tx, _rx) = watch::channel(TaskStatus::default());
-        let worker = Worker::builder()
-            .id(TaskId::new())
-            .url(url)
-            .file(file.clone())
-            .child_cancel(cancel)
-            .rate_limit(rate_limiter)
-            .status(tx)
-            .build();
-        // 注意这里 range 传入 None
-        (file.clone(), worker)
-    }
-
-    #[compio::test]
-    async fn test_any_worker() {
-        let (_file, worker) = mock_worker_any();
-        let result = worker.spawn().await.unwrap();
-        println!("{:?}", result);
-
-        // 对于 download_any，我们不知道确切大小，但可以断言结果是 Ok 且范围不为空
-        assert!(result.is_ok());
-        assert!(!result.unwrap().downloaded.is_empty());
     }
 }

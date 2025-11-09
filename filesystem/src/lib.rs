@@ -63,7 +63,7 @@ pub static USER_DIR: LazyLock<UserDirs> = LazyLock::new(|| UserDirs::new().expec
 const FOLDER_NAME: &str = "FalconTransfer_TEST";
 
 /// 根据 MIME 类型推荐保存路径
-pub fn recommand_path_for_mime(mime: &Mime, file_name: &str) -> Utf8PathBuf {
+fn recommand_path_for_mime(mime: &Mime, file_name: &str) -> Utf8PathBuf {
     let home_dir = || USER_DIR.home_dir();
     let download_dir = || USER_DIR.download_dir().unwrap_or_else(home_dir);
     let document_dir = || USER_DIR.document_dir().unwrap_or_else(download_dir);
@@ -92,14 +92,13 @@ pub fn recommand_path_for_mime(mime: &Mime, file_name: &str) -> Utf8PathBuf {
     base_path.join(FOLDER_NAME).join(file_name)
 }
 
-pub async fn assigned_writable_file(file_name: &str, mime: &Mime) -> io::Result<File> {
+pub async fn assign_path(file_name: &str, mime: &Mime) -> io::Result<Utf8PathBuf> {
     let path = recommand_path_for_mime(mime, file_name);
     // 确保父目录存在
     if let Some(parent) = path.parent() {
         compio::fs::create_dir_all(parent).await?;
     }
-    let file = OpenOptions::new().create_new(true).write(true).open(path).await?;
-    Ok(file)
+    Ok(path)
 }
 
 #[cfg(test)]

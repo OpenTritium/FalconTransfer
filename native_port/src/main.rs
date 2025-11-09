@@ -1,3 +1,4 @@
+mod watchers;
 use compio::{
     fs::{Stdin, Stdout, stdin, stdout},
     io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},

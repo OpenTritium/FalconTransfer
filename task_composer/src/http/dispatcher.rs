@@ -11,11 +11,11 @@ use crate::{
 };
 use async_broadcast as broadcast;
 use compio::{
-    fs::File,
+    fs::{File, OpenOptions},
     runtime::{JoinHandle, spawn},
 };
 use flume as mpmc;
-use futures_util::{StreamExt, select, stream::FuturesUnordered};
+use futures_util::{StreamExt, future::OkInto, select, stream::FuturesUnordered};
 use identity::task::TaskId;
 use see::sync as watch;
 use smol_cancellation_token::CancellationToken;
@@ -246,9 +246,18 @@ impl Dispatcher {
             Ok(Create { box meta, box watch }) => {
                 info!("create task with meta: {:?}", meta);
                 // 添加任务后立刻催动工作者
-                let file = filesystem::assigned_writable_file(meta.name(), meta.mime()).await.unwrap(); // todo 错误处理，计划是推入任务，但是不spawn
-                let id = self.push_task(meta, watch, file);
-                self.spawn_many_worker(id);
+                let path = filesystem::assign_path(meta.name(), meta.mime()).await.unwrap();
+                let file = OpenOptions::new().create_new(true).write(true).open(&path).await;
+                match file {
+                    Ok(file) => {
+                        let id = self.push_task(meta, watch, file.into());
+                        self.spawn_many_worker(id);
+                    }
+                    Err(err) => {
+                        watch.send_modify(|status| status.set_err(err.into()));
+                        self.push_task(meta, watch, None);
+                    }
+                }
             }
             Err(err) => {
                 error!("cmd receiver error: {:?}", err);
@@ -257,7 +266,7 @@ impl Dispatcher {
     }
 
     #[instrument(skip_all)]
-    fn push_task(&mut self, meta: HttpTaskMeta, tx: watch::Sender<TaskStatus>, file: File) -> TaskId {
+    fn push_task(&mut self, meta: HttpTaskMeta, tx: watch::Sender<TaskStatus>, file: Option<File>) -> TaskId {
         let total = meta.content_range();
         if let Some(ref total) = total {
             tx.send_modify(|status| status.total = total.last());
@@ -268,7 +277,7 @@ impl Dispatcher {
             max_concurrency: Self::DEAFULT_MAX_CONCURRENCY,
             current_concurrency: 0,
             retries_left: Self::DEFAULT_MAX_RETRIES,
-            file: file.into(),
+            file,
             cancel: CancellationToken::new(),
             status: tx,
             rate_limit: SharedRateLimiter::new_with_no_limit(),

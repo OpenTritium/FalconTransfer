@@ -22,7 +22,11 @@ async fn main() {
     let url = Url::parse("https://releases.ubuntu.com/24.04/ubuntu-24.04.3-desktop-amd64.iso").unwrap();
     // let url = Url::parse("https://repo.df.qq.com/repo/launcher/deltaforceminiloader0.0.7.38.10430644.exe").unwrap();
     let meta = Box::new(fetch_meta(&url).await.unwrap());
-    let (status_tx, mut status_rx) = watch::channel(TaskStatus::default());
+    let (status_tx, mut status_rx) = watch::channel(TaskStatus::default_with(
+        meta.url().clone(),
+        meta.path().into(),
+        meta.content_range().and_then(|rng| rng.last().map(|n| n + 1)),
+    ));
     let cmd = TaskCommand::Create { meta, watch: status_tx.into() };
     cmd_tx.send_async(cmd).await.unwrap();
 

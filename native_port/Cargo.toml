@@ -8,3 +8,5 @@ serde = { version = "1.0.228", features = ["serde_derive"] }
 serde_json = "1.0.145"
 compio = { workspace = true }
 identity = { path = "../identity" }
+see = { workspace = true }
+task_composer = { path = "../task_composer" }
