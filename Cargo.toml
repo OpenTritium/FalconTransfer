@@ -23,5 +23,12 @@ typed-builder = "0.23.0"
 mime = "0.3.17"
 camino = "1.2.1"
 tracing = "0.1"
-tracing-subscriber = "0.3.0"
-see = "0.1.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+tracing-panic = "0.1"
+see = { git = "https://github.com/OpenTritium/see.git", branch = "into_stream", features = [
+  "stream",
+] }
+async-broadcast = "0.7.2"
+url = { version = "2.5.7", features = ["serde"] }
+async-lock = "3.4.1"

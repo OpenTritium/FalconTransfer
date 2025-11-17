@@ -1,22 +1,36 @@
 use crate::http::worker::WorkerError;
 use TaskStateDesc::*;
 use camino::Utf8PathBuf;
+use identity::task::TaskId;
 use sparse_ranges::RangeSet;
 use url::Url;
 
 #[derive(Debug)]
 pub struct TaskStatus {
+    pub id: TaskId,
+    pub name: String,
     pub total: Option<usize>,
     pub downloaded: RangeSet,
     pub state: TaskStateDesc,
     pub err: Option<WorkerError>,
-    pub url: Url,
-    pub path: Utf8PathBuf,
+    pub url: Url,                  //重定向成功后记得更新
+    pub path: Option<Utf8PathBuf>, // 可能创建文件失败
 }
 
 impl TaskStatus {
-    pub fn default_with(url: Url, path: Utf8PathBuf, total_size: Option<usize>) -> Self {
-        Self { total: total_size, downloaded: RangeSet::new(), state: TaskStateDesc::default(), err: None, url, path }
+    pub fn default_with(
+        id: TaskId, name: &str, url: Url, path: Option<Utf8PathBuf>, total_size: Option<usize>,
+    ) -> Self {
+        Self {
+            total: total_size,
+            downloaded: RangeSet::new(),
+            state: TaskStateDesc::default(),
+            err: None,
+            url,
+            path,
+            id,
+            name: name.to_string(),
+        }
     }
 
     pub fn has_err(&self) -> bool { self.err.is_some() }

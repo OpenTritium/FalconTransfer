@@ -10,3 +10,13 @@ compio = { workspace = true }
 identity = { path = "../identity" }
 see = { workspace = true }
 task_composer = { path = "../task_composer" }
+futures-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+flume = { workspace = true }
+async-broadcast = { workspace = true }
+url = { workspace = true }
+async-lock = { workspace = true }
+tracing-panic = { workspace = true }
+dashmap = "6.1.0"

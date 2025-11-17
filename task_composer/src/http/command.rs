@@ -8,7 +8,7 @@ use std::{
 
 #[derive(Debug, Clone)]
 pub enum TaskCommand {
-    ChangeConcurrency { id: TaskId, concuerrency: NonZeroU8 },
+    ChangeConcurrency { id: TaskId, concurrency: NonZeroU8 },
     ChangeRateLimited { id: TaskId, limit: Option<NonZeroU32> },
     Pause(TaskId),
     Resume(TaskId),

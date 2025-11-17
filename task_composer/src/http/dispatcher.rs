@@ -15,7 +15,7 @@ use compio::{
     runtime::{JoinHandle, spawn},
 };
 use flume as mpmc;
-use futures_util::{StreamExt, future::OkInto, select, stream::FuturesUnordered};
+use futures_util::{StreamExt, select, stream::FuturesUnordered};
 use identity::task::TaskId;
 use see::sync as watch;
 use smol_cancellation_token::CancellationToken;
@@ -23,6 +23,7 @@ use sparse_ranges::RangeSet;
 use std::{
     any::Any,
     collections::{HashMap, HashSet},
+    io,
     num::NonZeroU8,
     ops::Not,
     rc::Rc,
@@ -62,7 +63,7 @@ pub struct Dispatcher {
 impl Dispatcher {
     const BLOCK_SIZE: usize = 0x100_0000;
     const DEAFULT_MAX_CONCURRENCY: NonZeroU8 = NonZeroU8::new(8).unwrap();
-    const DEFAULT_MAX_RETRIES: u8 = 5;
+    const DEFAULT_MAX_RETRIES: u8 = 32;
 
     #[instrument(skip_all)]
     pub fn spawn(mut self) -> JoinHandle<()> {
@@ -195,7 +196,7 @@ impl Dispatcher {
                     task.rate_limit.change_limit(limit);
                 }
             }
-            Ok(ChangeConcurrency { ref id, concuerrency }) => {
+            Ok(ChangeConcurrency { ref id, concurrency: concuerrency }) => {
                 info!("task {id:?} change concurrency: {concuerrency}");
                 if let Some(task) = self.tasks.get_mut(id) {
                     task.max_concurrency = concuerrency;
@@ -214,8 +215,47 @@ impl Dispatcher {
                 self.pendings.remove(id); // 如果是被暂停的，那就从暂停名单中移除一下
                 if let Some(task) = self.tasks.get_mut(id) {
                     task.retries_left = Self::DEFAULT_MAX_RETRIES; // 可能是因为尝试次数耗尽导致停止的,所以恢复一下
-                    let _ = task.status.send_if_modified(|status| status.state.set_running()); // 恢复一下对外界的状态
+
+                    // 如果没有文件句柄，则尝试重新创建文件
+                    if task.file.is_none() {
+                        info!("task {id:?} has no file handle, attempting to recreate");
+                        let path = filesystem::assign_path(task.meta.name(), task.meta.mime()).await;
+                        info!("assigned path for task {id:?}: {:?}", path);
+
+                        match path {
+                            Ok(ref p) => {
+                                match OpenOptions::new().create_new(true).write(true).open(p).await {
+                                    Ok(file) => {
+                                        task.file = Some(file);
+                                        task.status.send_modify(|status| {
+                                            status.path = path.ok();
+                                        });
+                                    }
+                                    Err(err) => {
+                                        error!("failed to recreate file for task {id:?}: {err:?}");
+                                        task.status.send_modify(|status| {
+                                            status.set_err(err.into());
+                                            status.state.set_failed(); // 保持失败状态
+                                        });
+                                        return; // 不继续执行spawn_many_worker
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                error!("failed to assign path for task {id:?}: {err:?}");
+                                task.status.send_modify(|status| {
+                                    status.set_err(err.into());
+                                    status.state.set_failed(); // 保持失败状态
+                                });
+                                return; // 不继续执行spawn_many_worker
+                            }
+                        }
+                    }
+
+                    // 设置运行状态
+                    let _ = task.status.send_if_modified(|status| status.state.set_running());
                 }
+
                 self.spawn_many_worker(*id); // 催动更多工作者
             }
             Ok(Cancel(ref id)) => {
@@ -243,18 +283,32 @@ impl Dispatcher {
                 }
             }
             // 总是从新元数据创建新文件，后面设计一个指定文件并恢复进度的
+            // 这里需要更新对外状态的路径
             Ok(Create { box meta, box watch }) => {
                 info!("create task with meta: {:?}", meta);
                 // 添加任务后立刻催动工作者
-                let path = filesystem::assign_path(meta.name(), meta.mime()).await.unwrap();
-                let file = OpenOptions::new().create_new(true).write(true).open(&path).await;
+                let path = filesystem::assign_path(meta.name(), meta.mime()).await;
+                info!("assigned path for task: {:?}", path);
+                let file = if let Ok(ref path) = path {
+                    OpenOptions::new().create_new(true).write(true).open(path).await
+                } else {
+                    Err(io::Error::other("no path available"))
+                };
+                // watch 在送到之前就更新 url， 然后再更新路径
+                let id = watch.borrow().id;
+                info!("file creation result: {:?}", file.is_ok());
                 match file {
                     Ok(file) => {
-                        let id = self.push_task(meta, watch, file.into());
+                        watch.send_modify(|status| status.path = path.ok());
+                        self.push_task(meta, watch, file.into());
                         self.spawn_many_worker(id);
                     }
                     Err(err) => {
-                        watch.send_modify(|status| status.set_err(err.into()));
+                        error!("failed to create file for task {id:?}: {err:?}");
+                        watch.send_modify(|status| {
+                            status.set_err(err.into());
+                            status.state.set_failed(); // 确保状态更新为Failed
+                        });
                         self.push_task(meta, watch, None);
                     }
                 }
@@ -266,11 +320,13 @@ impl Dispatcher {
     }
 
     #[instrument(skip_all)]
-    fn push_task(&mut self, meta: HttpTaskMeta, tx: watch::Sender<TaskStatus>, file: Option<File>) -> TaskId {
+    fn push_task(&mut self, meta: HttpTaskMeta, tx: watch::Sender<TaskStatus>, file: Option<File>) {
         let total = meta.content_range();
+        let id = tx.borrow().id;
         if let Some(ref total) = total {
             tx.send_modify(|status| status.total = total.last());
         }
+        info!("pushing task {id:?} with file: {:?}", file.is_some());
         let task_state = TaskState {
             meta: meta.into(),
             inflight: Default::default(),
@@ -284,29 +340,37 @@ impl Dispatcher {
             committed: Default::default(),
             remaining: total,
         };
-        let id = TaskId::new();
         self.tasks.insert(id, task_state);
-        id
     }
 
     // 对于支持多线程下载的最大并发数量才被设置，单线程始终是1
     #[instrument(skip(self))]
     fn spawn_many_worker(&mut self, id: TaskId) {
+        info!("attempting to spawn worker for task {id:?}");
         let Some(task) = self.tasks.get_mut(&id) else {
+            warn!("task {id:?} not found when trying to spawn worker");
             return;
         };
+
+        info!("task {id:?} file status: {:?}", task.file.is_some());
         if task.file.is_none() {
             // 此时有 worker 关闭了文件句柄，就不要继续催动工作者了
+            warn!("task {id:?} has no file handle, not spawning worker");
             return;
         }
+
         let meta = task.meta.as_ref();
         let is_single = meta.is_support_ranges().not();
+        info!("task {id:?} is single threaded: {is_single}");
         // 如果只支持单线程且当前有一个工作者，则直接返回
         if is_single && task.current_concurrency != 0 {
+            info!("task {id:?} is single-threaded and already has a worker, not spawning more");
             return;
         }
+
         // 如果仅支持单线程且当前没有工作者，则创建一个工作者
         if is_single {
+            info!("spawning single worker for task {id:?}");
             let _ = task.status.send_if_modified(|status| status.state.set_running());
             let fut = Worker::builder()
                 .id(id)
@@ -323,11 +387,15 @@ impl Dispatcher {
             info!("spawn single worker for task {id:?}");
             return;
         }
+
         let more_concurrency = task.max_concurrency.get().saturating_sub(task.current_concurrency);
+        info!("task {id:?} can spawn {more_concurrency} more workers");
         // 不需要更多并发
         if more_concurrency == 0 {
+            info!("task {id:?} has reached max concurrency, not spawning more workers");
             return;
         }
+
         let _ = task.status.send_if_modified(|status| status.state.set_running());
         // 如果你支持 range 那我就假定你有 content-range
         let remaining = task.remaining.as_mut().unwrap();

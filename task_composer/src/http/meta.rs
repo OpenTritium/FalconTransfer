@@ -30,7 +30,7 @@ impl HttpTaskMeta {
 
     pub fn mime(&self) -> &Mime { &self.mime }
 
-    pub fn path(&self) -> &Utf8Path { &self.name }
+    pub fn named_path(&self) -> &Utf8Path { &self.name }
 
     /// 返回 None 代表 header 未告知文件， 返回空集合代表长度为 0
     pub fn content_range(&self) -> Option<RangeSet> {
