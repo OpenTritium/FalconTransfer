@@ -1,7 +1,7 @@
 use crate::http::worker::WorkerError;
 use TaskStateDesc::*;
 use camino::Utf8PathBuf;
-use identity::task::TaskId;
+use falcon_identity::task::TaskId;
 use sparse_ranges::RangeSet;
 use url::Url;
 
@@ -10,10 +10,11 @@ pub struct TaskStatus {
     pub id: TaskId,
     pub name: String,
     pub total: Option<usize>,
-    pub downloaded: RangeSet,
+    pub buffered: RangeSet, // 缓冲写入量
+    pub flushed: RangeSet,  // 刷入量
     pub state: TaskStateDesc,
     pub err: Option<WorkerError>,
-    pub url: Url,                  //重定向成功后记得更新
+    pub url: Url,                  // 重定向成功后记得更新
     pub path: Option<Utf8PathBuf>, // 可能创建文件失败
 }
 
@@ -23,7 +24,8 @@ impl TaskStatus {
     ) -> Self {
         Self {
             total: total_size,
-            downloaded: RangeSet::new(),
+            buffered: RangeSet::new(),
+            flushed: RangeSet::new(),
             state: TaskStateDesc::default(),
             err: None,
             url,
@@ -41,30 +43,34 @@ impl TaskStatus {
 #[derive(Debug, Default, Clone, Copy)]
 pub enum TaskStateDesc {
     #[default]
-    Idle, // 空闲，刚创建好但是没有worker 的状态
+    Idle, // 空闲，刚创建好但是没有
     Running,   // 运行中
     Paused,    // 已暂停
     Completed, // 正常完成
     Cancelled, // 被取消
-    Failed,    //超过错误计数
+    Failed,    // 超过错误计数
 }
 
 impl TaskStateDesc {
+    #[inline]
     pub fn is_idle(&self) -> bool { matches!(self, Idle) }
 
+    #[inline]
     pub fn is_running(&self) -> bool { matches!(self, Running) }
 
+    #[inline]
     pub fn was_paused(&self) -> bool { matches!(self, Paused) }
 
+    #[inline]
     pub fn was_completed(&self) -> bool { matches!(self, Completed) }
 
+    #[inline]
     pub fn was_cancelled(&self) -> bool { matches!(self, Cancelled) }
 
+    #[inline]
     pub fn was_failed(&self) -> bool { matches!(self, Failed) }
 
-    /// 任务完成，取消或失败
-    pub fn is_terminal(&self) -> bool { matches!(self, Completed | Cancelled | Failed) }
-
+    #[inline]
     pub fn set_idle(&mut self) -> bool {
         if self.is_idle() {
             false
@@ -74,6 +80,7 @@ impl TaskStateDesc {
         }
     }
 
+    #[inline]
     pub fn set_running(&mut self) -> bool {
         if self.is_running() {
             false
@@ -83,7 +90,8 @@ impl TaskStateDesc {
         }
     }
 
-    pub fn set_pending(&mut self) -> bool {
+    #[inline]
+    pub fn set_paused(&mut self) -> bool {
         if self.was_paused() {
             false
         } else {
@@ -92,7 +100,8 @@ impl TaskStateDesc {
         }
     }
 
-    pub fn set_finished(&mut self) -> bool {
+    #[inline]
+    pub fn set_completed(&mut self) -> bool {
         if self.was_completed() {
             false
         } else {
@@ -101,6 +110,7 @@ impl TaskStateDesc {
         }
     }
 
+    #[inline]
     pub fn set_cancelled(&mut self) -> bool {
         if self.was_cancelled() {
             false
@@ -110,6 +120,7 @@ impl TaskStateDesc {
         }
     }
 
+    #[inline]
     pub fn set_failed(&mut self) -> bool {
         if self.was_failed() {
             false

@@ -28,7 +28,7 @@ impl DiscoveryService {
     pub fn run() -> Self {
         let neighbors = Arc::new(NeighborTable::new());
         let announce = announce::AnnounceDaemon::new();
-        announce.register().expect("failed to announce");
+        announce.register().expect("Failed to announce");
 
         let neighbors_clone = neighbors.clone();
         let handle = spawn(async move {
@@ -57,5 +57,6 @@ impl DiscoveryService {
         Self { daemon: announce, handle, neighbors }
     }
 
+    #[inline]
     pub fn neighbors(&self) -> &NeighborTable { &self.neighbors }
 }

@@ -1,13 +1,13 @@
 use crate::watchers::WatchGroup;
+use falcon_identity::task::TaskId;
+use falcon_task_composer::{TaskCommand, TaskStatus, fetch_meta};
 use flume as mpmc;
-use identity::task::TaskId;
 use see::sync as watch;
 use serde::Deserialize;
 use std::{
     io,
     num::{NonZeroU8, NonZeroU32},
 };
-use task_composer::{TaskCommand, TaskStatus, fetch_meta};
 use tracing::error;
 use url::Url;
 
@@ -49,7 +49,7 @@ pub async fn handle_cmd_res(
                 meta.name(),
                 meta.url().clone(),
                 None,
-                meta.content_range().and_then(|rng| rng.last().map(|n| n + 1)),
+                meta.full_content_range().and_then(|rng| rng.last().map(|n| n + 1)),
             );
             let (status_tx, status_rx) = watch::channel(default_status);
             let cmd = TaskCommand::Create { meta, watch: status_tx.into() };

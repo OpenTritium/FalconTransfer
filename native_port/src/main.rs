@@ -12,9 +12,9 @@ use crate::{
 };
 use async_broadcast as broadcast;
 use compio::runtime::spawn;
+use falcon_task_composer::TaskDispatcher;
 use flume as mpmc;
 use futures_util::{FutureExt, select};
-use task_composer::Dispatcher;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[compio::main]
@@ -30,7 +30,7 @@ async fn main() {
     let (cmd_tx, cmd_rx) = mpmc::unbounded();
     // todo 条件编译 qos
     let (_qos_tx, qos_rx) = broadcast::broadcast(1);
-    let dispatcher = Dispatcher::builder().cmd(cmd_rx).qos(qos_rx).build();
+    let dispatcher = TaskDispatcher::builder().cmd(cmd_rx).qos(qos_rx).build();
     spawn(async move { dispatcher.spawn().await }).detach();
     let mut watchers = WatchGroup::new();
     let snapshot = watchers.snapshot_all().await;

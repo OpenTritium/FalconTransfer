@@ -1,17 +1,20 @@
 //! UID，内部是 uuidv7 ，在外部做的 base58 序列化增加可读性
 use std::{fmt, ops::Deref, str::FromStr};
+use thiserror::Error;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PeerId(Uuid);
 
 impl PeerId {
+    #[inline]
     pub fn random_now() -> Self { PeerId(Uuid::now_v7()) }
 }
 
 impl Deref for PeerId {
     type Target = Uuid;
 
+    #[inline]
     fn deref(&self) -> &Self::Target { &self.0 }
 }
 
@@ -22,7 +25,7 @@ impl fmt::Display for PeerId {
     }
 }
 
-#[derive(thiserror::Error, Debug)]
+#[derive(Error, Debug)]
 pub enum Error {
     #[error(transparent)]
     Bs58DecodeError(#[from] bs58::decode::Error),
@@ -33,6 +36,7 @@ pub enum Error {
 impl FromStr for PeerId {
     type Err = Error;
 
+    #[inline]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let bytes = bs58::decode(s).into_vec()?;
         let uuid = Uuid::from_slice(&bytes)?;

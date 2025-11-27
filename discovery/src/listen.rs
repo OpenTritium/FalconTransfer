@@ -5,12 +5,14 @@ use mdns_sd::{ResolvedService, ServiceDaemon, ServiceEvent};
 pub type InstanceName = Box<str>;
 
 // fullname: <instance>.<service>.<domain>
+#[inline]
 pub fn parse_instance_from_fullname(fullname: &str) -> Option<&str> { fullname.strip_suffix(FULLNAME_SUFFIX) }
 
 pub enum ServiceOpt {
     Register(Box<ResolvedService>),
     Unregister(Box<str>),
 }
+
 pub fn listen() -> impl Stream<Item = ServiceOpt> {
     use ServiceEvent::*;
     use ServiceOpt::*;

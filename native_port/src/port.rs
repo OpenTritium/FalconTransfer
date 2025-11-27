@@ -13,6 +13,7 @@ pub struct NativePort {
 }
 
 impl NativePort {
+    #[inline]
     pub fn new() -> Self {
         let tx = BufWriter::new(stdout());
         let rx = stdin();

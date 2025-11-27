@@ -1,5 +1,5 @@
 [package]
-name = "identity"
+name = "falcon_identity"
 version = "0.1.0"
 edition = "2024"
 
@@ -7,4 +7,4 @@ edition = "2024"
 bs58 = "0.5.1"
 thiserror = { workspace = true }
 uuid = { version = "1.18.1", features = ["v7"] }
-serde = { version = "1.0.228", features = ["serde_derive"] }
+serde = { workspace = true }

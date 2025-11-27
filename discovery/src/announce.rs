@@ -9,6 +9,7 @@ pub struct AnnounceDaemon {
 }
 
 /// 不要相信你的主机名
+/// 将主机名净化成实例名称
 fn sanitize_hostname_to_instancename(name: &str) -> Box<str> {
     let mut buf = String::with_capacity(name.len());
     for c in name.chars() {
@@ -19,18 +20,20 @@ fn sanitize_hostname_to_instancename(name: &str) -> Box<str> {
             _ => buf.push(c),
         }
     }
-    const MAX_INSTANCE_LEN: usize = 63;
-    if buf.len() > MAX_INSTANCE_LEN {
+    const MAX_INSTANCE_NAME_LEN: usize = 63;
+    if buf.len() > MAX_INSTANCE_NAME_LEN {
         let boundary = buf
             .char_indices()
-            .find(|(idx, c)| idx + c.len_utf8() > MAX_INSTANCE_LEN)
+            .find(|(idx, c)| idx + c.len_utf8() > MAX_INSTANCE_NAME_LEN)
             .map(|(idx, _)| idx)
-            .unwrap_or(MAX_INSTANCE_LEN);
+            .unwrap_or(MAX_INSTANCE_NAME_LEN);
         buf.truncate(boundary);
     }
     buf.into_boxed_str()
 }
 
+/// 产生一个伪随机字符串
+#[inline]
 fn timestamp_based_str() -> Box<str> {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards").as_nanos();
     format!("{:X}", nanos).into_boxed_str()

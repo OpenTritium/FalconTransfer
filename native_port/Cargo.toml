@@ -1,15 +1,13 @@
 [package]
-name = "native_port"
+name = "falcon_native_port"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-serde = { version = "1.0.228", features = ["serde_derive"] }
+serde = { workspace = true }
 serde_json = "1.0.145"
 compio = { workspace = true }
-identity = { path = "../identity" }
 see = { workspace = true }
-task_composer = { path = "../task_composer" }
 futures-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -19,4 +17,6 @@ async-broadcast = { workspace = true }
 url = { workspace = true }
 async-lock = { workspace = true }
 tracing-panic = { workspace = true }
-dashmap = "6.1.0"
+
+falcon_identity = { path = "../identity" }
+falcon_task_composer = { path = "../task_composer" }

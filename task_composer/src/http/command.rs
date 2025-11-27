@@ -1,5 +1,5 @@
 use crate::http::{meta::HttpTaskMeta, status::TaskStatus};
-use identity::task::TaskId;
+use falcon_identity::task::TaskId;
 use see::sync as watch;
 use std::{
     fmt::Debug,
@@ -12,7 +12,7 @@ pub enum TaskCommand {
     ChangeRateLimited { id: TaskId, limit: Option<NonZeroU32> },
     Pause(TaskId),
     Resume(TaskId),
-    Cancel(TaskId), //取消但暂时不移除任务,因为它会drop 观测器,导致外部无法获悉状态
+    Cancel(TaskId), // 取消但不移除任务，这是为了确保外部观测到了任务真的被取消了
     Create { meta: Box<HttpTaskMeta>, watch: Box<watch::Sender<TaskStatus>> },
-    Remove(TaskId), // 我已经观测到取消,准许移除任务
+    Remove(TaskId), // 语义是外部已经观测到变更，请移除该任务
 }

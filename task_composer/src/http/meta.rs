@@ -1,14 +1,14 @@
 use crate::{
     http::{header_map_ext::HeaderMapExt, worker::GLOBAL_HTTP_CLIENT},
+    safe_filename::timebased_filename,
     utils::safe_filename::SafeFileName,
 };
 use camino::Utf8Path;
 use cyper::Response;
-use fastdate::DateTime;
 use http::header::CONTENT_TYPE;
 use mime::{APPLICATION_OCTET_STREAM, Mime};
 use sanitize_filename_reader_friendly::sanitize;
-use sparse_ranges::{Range, RangeSet};
+use sparse_ranges::RangeSet;
 use std::ops::Not;
 use url::Url;
 
@@ -30,16 +30,13 @@ impl HttpTaskMeta {
 
     pub fn mime(&self) -> &Mime { &self.mime }
 
-    pub fn named_path(&self) -> &Utf8Path { &self.name }
+    pub fn as_path_name(&self) -> &Utf8Path { &self.name }
 
     /// 返回 None 代表 header 未告知文件， 返回空集合代表长度为 0
-    pub fn content_range(&self) -> Option<RangeSet> {
+    pub fn full_content_range(&self) -> Option<RangeSet> {
         let size = self.size?;
         let mut set = RangeSet::new();
-        if size == 0 {
-            return Some(set);
-        }
-        set.insert_range(&Range::new(0, size - 1));
+        set.insert_n_at(size, 0);
         Some(set)
     }
 }
@@ -64,7 +61,7 @@ impl From<Response> for HttpTaskMeta {
             .ok()
             .or_else(|| parse_filename_from_url(url))
             .map(|ref s| sanitize(s))
-            .unwrap_or_else(|| format!("{}.bin", DateTime::now()))
+            .unwrap_or_else(|| timebased_filename(None))
             .as_str()
             .into();
         let ranges_support = headers.parse_accept_ranges();
@@ -77,6 +74,7 @@ pub async fn fetch_meta(url: &Url) -> cyper::Result<HttpTaskMeta> {
         return Ok(resp.into());
     }
     // todo 加点请求参数
+    // todo 先 range 请求一字节，如果连range 和 head 都不支持可以再 fallback
     GLOBAL_HTTP_CLIENT.get(url.clone())?.send().await.map(|resp| resp.into())
 }
 

@@ -2,11 +2,11 @@ use crate::{
     port::NativePort,
     task_info::{NativePayload, TaskInfo, TaskState},
 };
+use falcon_identity::task::TaskId;
+use falcon_task_composer::TaskStatus;
 use futures_util::{FutureExt, StreamExt, future::LocalBoxFuture, stream::FuturesUnordered};
-use identity::task::TaskId;
 use see::sync::Receiver;
 use std::{collections::HashMap, future::pending};
-use task_composer::TaskStatus;
 use tracing::{error, info, warn};
 
 #[derive(Debug, Clone)]
@@ -21,6 +21,7 @@ pub struct WatchGroup {
 }
 
 impl WatchGroup {
+    #[inline]
     pub fn new() -> Self { Self { watchers: HashMap::new(), pendings: FuturesUnordered::new() } }
 
     pub async fn snapshot_all(&mut self) -> Box<[TaskInfo]> {
@@ -64,6 +65,7 @@ impl WatchGroup {
         }
     }
 
+    #[inline]
     pub fn push(&mut self, rx: Receiver<TaskStatus>) {
         let id = rx.borrow().id;
         self.watchers.insert(id, rx);
@@ -73,8 +75,8 @@ impl WatchGroup {
 
 #[inline]
 fn map_status_to_info(status: &TaskStatus) -> TaskInfo {
-    use task_composer::TaskStateDesc::*;
-    let TaskStatus { id, total, downloaded, state, url, path, err, name } = status;
+    use falcon_task_composer::TaskStateDesc::*;
+    let TaskStatus { id, total, buffered: downloaded, state, url, path, err, name, .. } = status;
     let downloaded = downloaded.len();
     let state = match state {
         Idle => TaskState::Idle,

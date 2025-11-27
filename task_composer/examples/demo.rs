@@ -1,11 +1,10 @@
-use std::time::Duration;
-
 use async_broadcast as broadcast;
 use compio::{runtime::spawn, time::sleep};
+use falcon_identity::task::TaskId;
+use falcon_task_composer::{TaskCommand, TaskDispatcher, TaskStatus, fetch_meta};
 use flume as mpmc;
-use identity::task::TaskId;
 use see::sync as watch;
-use task_composer::{Dispatcher, TaskCommand, TaskStatus, fetch_meta};
+use std::time::Duration;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 use url::Url;
@@ -18,7 +17,7 @@ async fn main() {
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
     let (cmd_tx, cmd_rx) = mpmc::unbounded();
     let (_qos_tx, qos_rx) = broadcast::broadcast(1);
-    let dispatcher = Dispatcher::builder().cmd(cmd_rx).qos(qos_rx).build();
+    let dispatcher = TaskDispatcher::builder().cmd(cmd_rx).qos(qos_rx).build();
     spawn(async move { dispatcher.spawn().await }).detach();
     let url = Url::parse("https://releases.ubuntu.com/24.04/ubuntu-24.04.3-desktop-amd64.iso").unwrap();
     // let url = Url::parse("https://repo.df.qq.com/repo/launcher/deltaforceminiloader0.0.7.38.10430644.exe").unwrap();
@@ -28,7 +27,7 @@ async fn main() {
         meta.name(),
         meta.url().clone(),
         None,
-        meta.content_range().and_then(|rng| rng.last().map(|n| n + 1)),
+        meta.full_content_range().and_then(|rng| rng.last().map(|n| n + 1)),
     ));
     let cmd = TaskCommand::Create { meta, watch: status_tx.into() };
     cmd_tx.send_async(cmd).await.unwrap();

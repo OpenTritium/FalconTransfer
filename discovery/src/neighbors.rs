@@ -15,7 +15,8 @@ pub enum ScopedAddr {
 }
 
 impl ScopedAddr {
-    fn ip(&self) -> IpAddr {
+    #[inline]
+    pub fn ip(&self) -> IpAddr {
         use ScopedAddr::*;
         match *self {
             V4(addr) => IpAddr::V4(addr),
@@ -23,7 +24,8 @@ impl ScopedAddr {
         }
     }
 
-    fn scope_id(&self) -> Option<ScopeId> {
+    #[inline]
+    pub fn scope_id(&self) -> Option<ScopeId> {
         use ScopedAddr::*;
         match *self {
             V6 { scope_id, .. } => Some(scope_id),
@@ -31,20 +33,23 @@ impl ScopedAddr {
         }
     }
 
-    fn is_ipv4(&self) -> bool { matches!(*self, ScopedAddr::V4(_)) }
+    pub fn is_ipv4(&self) -> bool { matches!(*self, ScopedAddr::V4(_)) }
 
-    fn is_ipv6(&self) -> bool { matches!(*self, ScopedAddr::V6 { .. }) }
+    pub fn is_ipv6(&self) -> bool { matches!(*self, ScopedAddr::V6 { .. }) }
 }
 
 impl From<Ipv4Addr> for ScopedAddr {
+    #[inline]
     fn from(addr: Ipv4Addr) -> Self { ScopedAddr::V4(addr) }
 }
 
 impl From<(Ipv6Addr, ScopeId)> for ScopedAddr {
+    #[inline]
     fn from((addr, scope_id): (Ipv6Addr, ScopeId)) -> Self { ScopedAddr::V6 { scope_id, addr } }
 }
 
 impl From<ScopedIp> for ScopedAddr {
+    #[inline]
     fn from(src: ScopedIp) -> Self {
         match src {
             ScopedIp::V4(addr) => ScopedAddr::from(*addr.addr()),
