@@ -133,6 +133,7 @@ impl Worker {
             Self::update_progress(&mut status, file.buffered_range(), file.flushed_range());
         }
         file.shutdown().await?;
+        Self::update_progress(&mut status, file.buffered_range(), file.flushed_range());
         guard.exit();
         Ok(file.into_flushed_range())
     }
@@ -176,6 +177,8 @@ impl Worker {
             file.write_all(body).await.0?;
             Self::update_progress(&mut status, file.buffered_range(), file.flushed_range());
         }
+        file.shutdown().await?;
+        Self::update_progress(&mut status, file.buffered_range(), file.flushed_range());
         Ok(file.into_flushed_range())
     }
 
@@ -250,7 +253,9 @@ impl Worker {
                 file.write_all_at(payload, cur as u64).await.0?;
                 Self::update_progress(&mut status, file.buffered_range(), file.flushed_range());
             }
+            file.shutdown().await?;
         }
+        Self::update_progress(&mut status, file.buffered_range(), file.flushed_range());
         Ok(file.into_flushed_range())
     }
 

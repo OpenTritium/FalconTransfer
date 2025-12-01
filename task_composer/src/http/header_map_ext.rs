@@ -120,10 +120,12 @@ impl HeaderMapExt for HeaderMap {
             .ok_or_else(|| FieldFormat(CONTENT_DISPOSITION, content_disposition.to_string()))
     }
 
+    #[inline]
     fn parse_accept_ranges(&self) -> bool {
         self.get(ACCEPT_RANGES).and_then(|v| v.to_str().ok()).map(|s| s.contains("bytes")).unwrap_or(false)
     }
 
+    #[inline]
     fn parse_content_length(&self) -> Option<usize> {
         self.get(CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|s| s.parse::<usize>().ok())
     }

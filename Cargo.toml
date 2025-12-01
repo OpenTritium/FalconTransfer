@@ -1,14 +1,17 @@
 [workspace]
 resolver = "3"
 members = [
-  "native_port",
   "discovery",
   "filesystem",
   "identity",
+  "native_port",
   "task_composer",
 ]
 
 [workspace.dependencies]
+async-broadcast = "0.7.2"
+async-lock = "3.4.1"
+camino = "1.2.1"
 compio = { version = "0.16.1", features = [
   "dispatcher",
   "macros",
@@ -16,22 +19,19 @@ compio = { version = "0.16.1", features = [
   "process",
   "time",
 ] }
+criterion = "0.7.0"
 flume = { version = "0.11.1", default-features = false, features = ["async"] }
 futures-util = "0.3.31"
-thiserror = "2.0.17"
-typed-builder = "0.23.2"
 mime = "0.3.17"
-camino = "1.2.1"
+rstest = "0.26.1"
+see = { git = "https://github.com/compio-rs/see.git", features = ["stream"] }
+serde = { version = "1.0.228", features = ["serde_derive"] }
+sparse_ranges = "0.1.10"
+tempfile = { version = "3.23.0", features = ["nightly"] }
+thiserror = "2.0.17"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2.4"
 tracing-panic = "0.1"
-see = { git = "https://github.com/compio-rs/see.git", features = ["stream"] }
-sparse_ranges = "0.1.9"
-async-broadcast = "0.7.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+typed-builder = "0.23.2"
 url = { version = "2.5.7", features = ["serde"] }
-async-lock = "3.4.1"
-criterion = "0.7.0"
-tempfile = { version = "3.23.0", features = ["nightly"] }
-serde = { version = "1.0.228", features = ["serde_derive"] }
-rstest = "0.26.1"

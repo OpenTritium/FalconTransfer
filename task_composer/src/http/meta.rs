@@ -9,7 +9,7 @@ use http::header::CONTENT_TYPE;
 use mime::{APPLICATION_OCTET_STREAM, Mime};
 use sanitize_filename_reader_friendly::sanitize;
 use sparse_ranges::RangeSet;
-use std::ops::Not;
+use std::{fmt, ops::Not};
 use url::Url;
 
 #[derive(Debug, Clone)]
@@ -69,6 +69,34 @@ impl From<Response> for HttpTaskMeta {
     }
 }
 
+impl fmt::Display for HttpTaskMeta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Meta['{}']", self.name)?;
+
+        if let Some(size) = self.size {
+            let size_str = if size >= 1_073_741_824 {
+                format!("{:.2} GB", size as f64 / 1_073_741_824.0)
+            } else if size >= 1_048_576 {
+                format!("{:.2} MB", size as f64 / 1_048_576.0)
+            } else if size >= 1024 {
+                format!("{:.2} KB", size as f64 / 1024.0)
+            } else {
+                format!("{} B", size)
+            };
+            write!(f, " size: {}", size_str)?;
+        } else {
+            write!(f, " size: unknown")?;
+        }
+        write!(f, ", mime: {}", self.mime)?;
+        if self.ranges_support {
+            write!(f, " [ranges ✓]")?;
+        } else {
+            write!(f, " [ranges ✗]")?;
+        }
+        Ok(())
+    }
+}
+
 pub async fn fetch_meta(url: &Url) -> cyper::Result<HttpTaskMeta> {
     if let Ok(resp) = GLOBAL_HTTP_CLIENT.head(url.clone())?.send().await {
         return Ok(resp.into());
@@ -81,10 +109,49 @@ pub async fn fetch_meta(url: &Url) -> cyper::Result<HttpTaskMeta> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[compio::test]
     async fn test_fetch_meta() {
         let url = Url::parse("https://releases.ubuntu.com/24.04/ubuntu-24.04.3-desktop-amd64.iso").unwrap();
         let meta = fetch_meta(&url).await.unwrap();
         println!("{:?}", meta);
+    }
+
+    #[test]
+    fn test_http_task_meta_display() {
+        // Test with full size and ranges support
+        let mut meta = HttpTaskMeta {
+            url: Url::parse("https://example.com/file.iso").unwrap(),
+            name: "ubuntu-24.04.iso".into(),
+            size: Some(6_000_000_000), // 6 GB
+            mime: "application/x-iso9660-image".parse().unwrap(),
+            ranges_support: true,
+        };
+        println!("Full meta with ranges: {}", meta);
+        assert!(format!("{}", meta).contains("ubuntu-24.04.iso"));
+        assert!(format!("{}", meta).contains("GB"));
+        assert!(format!("{}", meta).contains("✓"));
+
+        // Test without size
+        meta.size = None;
+        println!("Meta without size: {}", meta);
+        assert!(format!("{}", meta).contains("unknown"));
+
+        // Test without ranges support
+        meta.size = Some(1_048_576); // 1 MB
+        meta.ranges_support = false;
+        println!("Meta without ranges support: {}", meta);
+        assert!(format!("{}", meta).contains("MB"));
+        assert!(format!("{}", meta).contains("✗"));
+
+        // Test small file (KB)
+        meta.size = Some(5120); // 5 KB
+        println!("Small file: {}", meta);
+        assert!(format!("{}", meta).contains("KB"));
+
+        // Test very small file (Bytes)
+        meta.size = Some(512); // 512 B
+        println!("Very small file: {}", meta);
+        assert!(format!("{}", meta).contains("B"));
     }
 }

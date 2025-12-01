@@ -1,0 +1,31 @@
+[package]
+name = "falcon_native_port-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_seqfile"
+path = "fuzz_targets/fuzz_seqfile.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_randfile"
+path = "fuzz_targets/fuzz_randfile.rs"
+test = false
+
+[dependencies]
+arbitrary = { version = "1.4.2", features = ["derive"] }
+compio = { version = "0.16.1", features = ["all"] }
+falcon_filesystem = { path = "../../filesystem" }
+libfuzzer-sys = "0.4"
+tempfile = "3.23.0"

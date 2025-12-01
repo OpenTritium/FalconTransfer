@@ -1,7 +1,7 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use fastdate::DateTime;
 use sanitize_filename_reader_friendly::sanitize;
-use std::{borrow::Borrow, ops::Deref};
+use std::{borrow::Borrow, fmt, ops::Deref};
 
 #[derive(Debug, Clone)]
 pub struct SafeFileName(Utf8PathBuf);
@@ -21,6 +21,10 @@ impl From<&str> for SafeFileName {
 impl Borrow<Utf8Path> for SafeFileName {
     #[inline]
     fn borrow(&self) -> &Utf8Path { &self.0 }
+}
+
+impl fmt::Display for SafeFileName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{}", self.0) }
 }
 
 /// 后缀不用带点

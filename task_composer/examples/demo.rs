@@ -12,7 +12,7 @@ use url::Url;
 #[compio::main]
 async fn main() {
     let subscriber = FmtSubscriber::builder()
-            .with_max_level(Level::DEBUG) // 捕获 DEBUG 及更高级别的日志
+            .with_max_level(Level::ERROR) // 捕获 DEBUG 及更高级别的日志
             .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
     let (cmd_tx, cmd_rx) = mpmc::unbounded();
@@ -35,6 +35,9 @@ async fn main() {
     loop {
         status_rx.changed().await.unwrap();
         sleep(Duration::from_secs(1)).await;
-        println!("status: {:?}", status_rx.borrow_and_update())
+        // 清屏，让显示更清晰
+        print!("\x1B[2J\x1B[1;1H");
+        // 使用新的 Display 格式显示任务状态
+        println!("{}", status_rx.borrow_and_update().as_ref());
     }
 }

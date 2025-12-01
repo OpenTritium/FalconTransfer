@@ -4,8 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-directories = "6.0.0"
-mime = { workspace = true }
-compio = { workspace = true }
 camino = { workspace = true }
+compio = { workspace = true }
+criterion = { workspace = true }
+directories = "6.0.0"
+futures-util = { workspace = true }
+mime = { workspace = true }
 sparse_ranges = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

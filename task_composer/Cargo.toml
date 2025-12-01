@@ -38,6 +38,7 @@ url = { workspace = true }
 
 falcon_identity = { path = "../identity" }
 falcon_filesystem = { path = "../filesystem" }
+ubyte = "0.10.4"
 
 [dev-dependencies]
 criterion = { workspace = true }

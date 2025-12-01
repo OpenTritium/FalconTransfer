@@ -5,18 +5,19 @@ use compio::{
     buf::{IntoInner, IoBuf, IoBufMut, SetBufInit, Slice},
     io::{AsyncWrite, AsyncWriteAt},
 };
-use sparse_ranges::Range;
 use std::{
     collections::BTreeMap,
     fmt::{self, Debug},
     io,
-    ops::{Deref, DerefMut},
+    ops::{self, Deref, DerefMut, RangeBounds},
+    slice,
 };
 
 pub const DEFAULT_BUF_SIZE: usize = 0x4000;
 pub const MAX_BUF_SIZE: usize = 0x40 * 0x400 * 0x400;
 pub const MISSING_BUF_MSG: &str = "The buffer was submitted for io and never returned";
 
+#[derive(Clone)]
 pub struct Inner {
     buf: Vec<u8>,
     pos: usize,
@@ -75,22 +76,19 @@ unsafe impl IoBufMut for Inner {
     fn as_buf_mut_ptr(&mut self) -> *mut u8 { self.buf.as_mut_ptr() }
 }
 
-/// A buffer with an internal progress tracker
-///
-/// ```plain
-/// +------------------------------------------------+
-/// |               Buf: Vec<u8> cap                 |
-/// +--------------------+-------------------+-------+
-/// +-- Progress (pos) --^                   |
-/// +-------- Initialized (vec len) ---------^
-///                      +------ remaining ------^
-/// ```
+#[derive(Clone)]
 pub struct Buffer(Option<Inner>);
 
 impl Buffer {
     /// Create a buffer with capacity.
     #[inline]
     pub fn with_capacity(cap: usize) -> Self { Self(Inner { buf: Vec::with_capacity(cap), pos: 0 }.into()) }
+
+    #[inline]
+    pub fn get_position(&self) -> usize { self.inner().pos }
+
+    #[inline]
+    pub fn set_position(&mut self, pos: usize) { self.inner_mut().pos = pos; }
 
     /// Get the initialized but not consumed part of the buffer.
     #[inline]
@@ -99,6 +97,34 @@ impl Buffer {
     /// Return the byte count that has not been processed
     #[inline]
     pub fn remaining_len(&self) -> usize { self.remaining().len() }
+
+    /// 截断 remaining 到指定长度
+    /// maybe panic
+    #[inline]
+    pub fn retain_remaining<R>(&mut self, rng: R)
+    where
+        R: RangeBounds<usize>,
+    {
+        let pos = self.get_position();
+        let len = self.remaining_len();
+        let ops::Range { start, end } = slice::range(rng, ..len);
+        if end < len {
+            self.buf_mut().truncate(end + pos);
+        }
+        if start > 0 {
+            self.buf_mut().drain(..start + pos);
+            self.set_position(0); // 截断头部需要重新设置游标
+        }
+    }
+
+    /// 劈掉 at.. 范围的字节
+    #[inline]
+    pub fn split_remaining_off(&mut self, at: usize) -> Self {
+        let pos = self.get_position();
+        let inner = self.buf_mut();
+        let right = inner.split_off(pos + at);
+        Buffer::from(right)
+    }
 
     /// If the inner buffer is empty.
     #[inline]
@@ -110,7 +136,7 @@ impl Buffer {
 
     /// Returns the capacity of the uninitialized part of the buffer (`capacity() - len()`).
     #[inline]
-    pub fn unintialized_capacity(&self) -> usize { self.buf().capacity() - self.buf().len() }
+    pub fn uninitialized_capacity(&self) -> usize { self.buf().capacity() - self.buf().len() }
 
     /// Clear the inner buffer and reset the position to the start.
     #[inline]
@@ -121,17 +147,17 @@ impl Buffer {
     /// 如果为缓冲区空就直接返回
     #[inline]
     pub fn compact(&mut self) {
-        let inner = self.inner_mut();
         // If the buffer is empty (len is 0), there is nothing to compact
-        if inner.buf.is_empty() {
+        if self.buf().is_empty() {
             return;
         }
         // If pos is 0, there is nothing to compact.
-        if inner.pos > 0 {
-            let filled_len = inner.buf.len() - inner.pos;
-            inner.buf.copy_within(inner.pos.., 0);
-            inner.pos = 0;
-            unsafe { inner.buf.set_len(filled_len) };
+        let pos = self.get_position();
+        if pos > 0 {
+            let filled_len = self.buf().len() - pos;
+            self.buf_mut().copy_within(pos.., 0);
+            self.set_position(0);
+            unsafe { self.buf_mut().set_len(filled_len) };
         }
     }
 
@@ -152,22 +178,20 @@ impl Buffer {
     #[inline]
     pub fn shrink_to_fit(&mut self) { self.inner_mut().buf.shrink_to_fit(); }
 
-    /// Shrinks the capacity of the underlying buffer with a lower bound.
+    /// 尝试将容量缩减至 limit。
     ///
-    /// This directly calls [`Vec::shrink_to()`] on the internal buffer. The
-    /// capacity will remain at least as large as `min_cap`.
-    ///
-    /// # Warning
-    ///
-    /// This method does **not** compact the buffer first. The capacity will be
-    /// shrunk relative to the current `len()` of the buffer, not the length of
-    /// the *unprocessed* data.
-    ///
-    /// To ensure the capacity is at least `min_cap` and also fits all
-    /// unprocessed data, you should call [`compact()`] **before** calling this
-    /// method.
+    /// 逻辑如下：
+    /// 1. 如果当前数据长度 (len) > limit：视为高负载状态，为了性能**不做任何操作**（防止将容量缩减至 len
+    ///    后，下次写入又要扩容）。
+    /// 2. 如果当前容量 (cap) <= limit：无需回收，**不做任何操作**（标准库 shrink_to 也会处理这个，但提前判断更清晰）。
+    /// 3. 如果 len <= limit < cap：将容量缩减至 limit，释放多余内存。
     #[inline]
-    pub fn shrink_to(&mut self, min_cap: usize) { self.inner_mut().buf.shrink_to(min_cap); }
+    pub fn shrink_to_limit(&mut self, limit: usize) {
+        if self.buf().len() > limit {
+            return;
+        }
+        self.buf_mut().shrink_to(limit);
+    }
 
     /// Reserves capacity for at least `additional` more bytes to be inserted into the buffer's underlying `Vec<u8>`.
     ///
@@ -186,7 +210,7 @@ impl Buffer {
         /// 如果当前容量足够，则返回 true
         /// 如果当前容量不足，则返回 false
         fn try_write_all(dst: &mut Buffer, src: &[u8]) -> bool {
-            if dst.unintialized_capacity() >= src.len() {
+            if dst.uninitialized_capacity() >= src.len() {
                 dst.buf_mut().extend_from_slice(src);
                 true
             } else {
@@ -290,11 +314,24 @@ impl Buffer {
     #[inline]
     #[must_use]
     fn buf_mut(&mut self) -> &mut Vec<u8> { &mut self.inner_mut().buf }
+
+    /// 作为左半部分连接 other buffer
+    /// 会先将 other compact 一下再 append
+    #[inline]
+    fn left_join(&mut self, mut other: Buffer) {
+        other.compact();
+        self.buf_mut().append(other.buf_mut());
+    }
 }
 
 impl From<&[u8]> for Buffer {
     #[inline]
-    fn from(slice: &[u8]) -> Self { Self::from_inner(Inner { buf: slice.to_vec(), pos: 0 }) }
+    fn from(slice: &[u8]) -> Self { Self::from(slice.to_vec()) }
+}
+
+impl From<Vec<u8>> for Buffer {
+    #[inline]
+    fn from(vec: Vec<u8>) -> Self { Self::from_inner(Inner { buf: vec, pos: 0 }) }
 }
 
 impl Debug for Buffer {
@@ -308,6 +345,7 @@ impl Debug for Buffer {
     }
 }
 
+#[derive(Debug)]
 pub struct VectoredBuffer(BTreeMap<usize, Buffer>); // start ,buf
 
 pub struct BufferAt<'a> {
@@ -359,9 +397,9 @@ impl VectoredBuffer {
 
     /// 有效的回收内存
     #[inline]
-    pub fn shrink_all_to(&mut self, min_cap: usize) {
+    pub fn shrink_all_to_limit(&mut self, min_cap: usize) {
         for buf in self.0.values_mut() {
-            buf.shrink_to(min_cap);
+            buf.shrink_to_limit(min_cap);
         }
     }
 
@@ -372,50 +410,125 @@ impl VectoredBuffer {
     pub fn all_done(&self) -> bool { self.0.values().all(|buf| buf.all_done()) }
 
     #[inline]
-    pub fn totoal_remaining_len(&self) -> usize { self.0.values().map(|buf| buf.remaining_len()).sum() }
+    pub fn total_remaining_len(&self) -> usize { self.0.values().map(|buf| buf.remaining_len()).sum() }
 
     #[inline]
     pub fn is_empty(&self) -> bool { self.0.is_empty() }
 
-    /// 理想状态是这个api总是会合并相邻的缓冲区？
-    /// 需要注意的是，记得回收已经写完的缓冲区防止 range 错误，当然我相信 flush_to 已经做好了
+    /// 打洞或移除部分 range
+    fn invalidate_overlapped(&mut self, start: usize, end: usize) {
+        // 收集所有需要修改或删除的 key
+        let mut to_process = Vec::new();
+
+        // 查找到 end 之前的所有节点。
+        // 实际上只需要检查 range(..end) 的最后一个节点（因为它可能跨越 start）以及 range(start..end) 的所有节点
+        // 但为了实现简单稳健，我们遍历 ..end，反向查找直到 buffer 的 end <= start 为止
+        for (&buf_start, buf) in self.0.range(..end).rev() {
+            let buf_end = buf_start + buf.remaining_len();
+            if buf_end <= start {
+                // 因为是按 key 排序的，如果当前 buf 的结束位置都在 start 之前，
+                // 那更前面的 buf 肯定也不相关，可以直接停止搜索
+                break;
+            }
+            // 发生重叠
+            to_process.push(buf_start);
+        }
+
+        // 打洞
+        for buf_start in to_process {
+            // 弹出旧 buffer
+            let mut buf = self.0.remove(&buf_start).unwrap();
+            let buf_len = buf.remaining_len();
+            debug_assert_ne!(buf_len, 0);
+            let buf_end = buf_start + buf_len;
+            // 快速跳过那些中间地带
+            // 如果旧 Buffer 完全在 [start, end) 之间，它就被直接丢弃了（remove 后不 insert）
+            if !(buf_start < start || buf_end > end) {
+                continue;
+            }
+            // 检查是否需要分裂 (Split)
+            let keep_left = buf_start < start;
+            let keep_right = buf_end > end;
+
+            if keep_left && keep_right {
+                let left_len = start - buf_start;
+                let mut new_right = buf.split_remaining_off(left_len);
+                self.0.insert(buf_start, buf);
+                let right_skip = end - start; // (end - buf_start) - left_len 等价于 end - start
+                new_right.retain_remaining(right_skip..);
+                self.0.insert(end, new_right);
+            } else if keep_left {
+                let keep_len = start - buf_start;
+                buf.retain_remaining(..keep_len);
+                self.0.insert(buf_start, buf);
+            } else if keep_right {
+                let skip_len = end - buf_start;
+                buf.retain_remaining(skip_len..);
+                self.0.insert(end, buf);
+            }
+        }
+    }
+
+    /// 智能写入：处理重叠、左合并、右合并
     pub fn read_from_at(&mut self, src: &[u8], pos: usize) -> usize {
         if src.is_empty() {
             return 0;
         }
-        let src_rng: Range = (&(pos..pos + src.len())).try_into().unwrap();
-        let rhs = self.0.iter_mut().find_map(|(&start, buf)| {
-            if buf.is_empty() {
-                return None;
+        // 限制单次写入最大长度
+        let write_len = src.len().min(MAX_BUF_SIZE);
+        let partial_src = &src[..write_len];
+        let write_end = pos + write_len;
+        // 清理重叠区域
+        self.invalidate_overlapped(pos, write_end);
+        // 尝试左合并
+        // 检查是否存在一个 Buffer 刚好结束在 pos
+        // 注意：BTreeMap.range(..=pos) 的最后一个元素
+        let merged_left = if let Some((&prev_key, prev_buf)) = self.0.range_mut(..=pos).next_back()
+            && {
+                let prev_end = prev_key + prev_buf.remaining_len();
+                prev_end == pos
             }
-            let tobe_merged_rng: Range = (&(start..start + buf.remaining_len())).try_into().unwrap();
-            if !tobe_merged_rng.is_adjacent(&src_rng) {
-                return None;
-            }
-            debug_assert!(src_rng != tobe_merged_rng);
-            // 确保新增的数据在某个缓冲右边
-            if src_rng <= tobe_merged_rng {
-                return None;
-            }
-            Some(buf)
-        });
-        if let Some(rhs) = rhs {
-            return rhs.read_from(src);
-        }
-        let written = if src.len() <= MAX_BUF_SIZE {
-            // 如果缓冲比较小，就直接塞到 map
-            self.0.insert(pos, src.into());
-            src.len()
+            && prev_buf.remaining_len() + partial_src.len() <= MAX_BUF_SIZE
+        {
+            let _ = prev_buf.read_from(partial_src);
+            true
         } else {
-            // 如果比较大先塞大部分
-            self.0.insert(pos, (&src[..MAX_BUF_SIZE]).into());
-            MAX_BUF_SIZE
+            false
         };
-        debug_assert!(written <= MAX_BUF_SIZE);
-        debug_assert!(self.0.values().all(|buf| buf.remaining_len() <= MAX_BUF_SIZE));
-        written
+        // 如果没有左合并，就作为一个新节点插入
+        if !merged_left {
+            self.0.insert(pos, Buffer::from(partial_src));
+        }
+
+        // 此时，pos 处的数据已经存在（要么在左边的 buffer 里，要么是新插入的 buffer）
+        // 我们需要知道当前生效的 buffer 的 key 和引用
+        // 因为可能是左合并的 (key < pos)，也可能是新插入的 (key == pos)
+        let (cur_buf_start, cur_buf_end) = {
+            // 找 <= pos 的最后一个
+            let (&k, buf) = self.0.range(..=pos).next_back().expect("Should exist after insert/merge");
+            (k, k + buf.remaining_len())
+        };
+
+        // 尝试右合并 (Merge Right/Bridging)
+        // 检查 current_buf_end 位置是否刚好是下一个 buffer 的开始
+        // 这里的逻辑可以把两个原本断开的 buffer 连起来（填补空洞的情况）
+        if let Some(&next_buf_start) = self.0.range(cur_buf_end..).next().map(|(k, _)| k) {
+            if next_buf_start == cur_buf_end {
+                // 只有当合并后不超过 MAX_BUF_SIZE 才合并
+                let next_len = self.0.get(&next_buf_start).unwrap().remaining_len();
+                let cur_len = self.0.get(&cur_buf_start).unwrap().remaining_len();
+                if cur_len + next_len <= MAX_BUF_SIZE {
+                    let next_buf = self.0.remove(&next_buf_start).unwrap();
+                    // 拿出数据追加到左边
+                    let left_buf = self.0.get_mut(&cur_buf_start).unwrap();
+                    left_buf.left_join(next_buf);
+                }
+            }
+        }
+        write_len
     }
 
+    // todo 实际上现在还是串行写入
     pub async fn flush_to(&mut self, dst: &mut impl AsyncWriteAt) -> io::Result<usize> {
         if self.all_done() {
             return Ok(0);
@@ -569,7 +682,7 @@ mod tests {
         vbuf.read_from_at(b"Hello", 0);
         vbuf.read_from_at(b"World", 100);
 
-        assert_eq!(vbuf.totoal_remaining_len(), 10);
+        assert_eq!(vbuf.total_remaining_len(), 10);
 
         // 内部结构校验：应该有两个 Buffer
         let mut iter = vbuf.iter_mut();
@@ -623,13 +736,18 @@ mod tests {
         vbuf.read_from_at(b"Later", 20);
 
         // 再插入前面的: [15..20)
-        // 你的逻辑中：
-        // src_rng (15..20) <= tobe_merged_rng (20..25) 是 True (Range 比较通常比较 start)
-        // 代码里: if src_rng <= tobe_merged_rng { return None; }
-        // 所以这应该**不会**触发合并，而是插入新的 entry
+        // 你的 read_from_at 实现中包含了 "Right Merge (Bridging)" 逻辑
+        // 当插入 15..20 后，它会发现 end(20) == next_start(20)，从而触发合并
         vbuf.read_from_at(b"Prior", 15);
 
-        assert_eq!(vbuf.iter_mut().count(), 2, "Current logic does not support prepend-merge");
+        // 修正：实际上现在的逻辑支持这种合并，结果应该是一个 Buffer
+        assert_eq!(vbuf.iter_mut().count(), 1, "Current logic SHOULD support prepend-merge (bridging)");
+
+        // 验证合并后的内容是否正确
+        let mut iter = vbuf.iter_mut();
+        let buf = iter.next().unwrap();
+        assert_eq!(buf.offset, 15);
+        assert_eq!(buf.remaining(), b"PriorLater");
     }
 
     #[compio::test]
@@ -685,5 +803,131 @@ mod tests {
         // 此时 all_done 为 true
         vbuf.release_done();
         assert!(vbuf.is_empty());
+    }
+
+    #[compio::test]
+    async fn test_vectored_overwrite_middle() {
+        let mut vbuf = VectoredBuffer::new();
+        // 1. 初始: [0..10) "AAAAAAAAAA"
+        vbuf.read_from_at(b"AAAAAAAAAA", 0);
+
+        // 2. 覆盖中间: [3..7) "BBBB"
+        // 这一步会触发 invalidate_overlapped：
+        // - 旧 buffer 被取出
+        // - 分裂出左边 [0..3) "AAA"
+        // - 分裂出右边 [7..10) "AAA"
+        // - 插入中间 [3..7) "BBBB"
+        // - 触发左合并 (0+3) -> [0..7)
+        // - 触发右合并 (7+3) -> [0..10)
+        vbuf.read_from_at(b"BBBB", 3);
+
+        assert_eq!(vbuf.total_remaining_len(), 10);
+
+        // 如果合并逻辑完美，这里应该只有1个buffer
+        assert_eq!(vbuf.iter_mut().count(), 1, "Should merge back into single buffer after overwrite");
+
+        let mut iter = vbuf.iter_mut();
+        let buf = iter.next().unwrap();
+        assert_eq!(buf.remaining(), b"AAABBBBAAA");
+    }
+
+    #[compio::test]
+    async fn test_vectored_overwrite_overlap_multiple() {
+        let mut vbuf = VectoredBuffer::new();
+        // 构造碎片: [0..5) "A...", [10..15) "B..."
+        vbuf.read_from_at(b"AAAAA", 0);
+        vbuf.read_from_at(b"BBBBB", 10);
+
+        // 写入一个跨越两个 buffer 的数据: [3..12) "CCCCCCCC" (len 9)
+        // 这应该：
+        // 1. 截断第一个 buffer 为 [0..3) "AAA"
+        // 2. 完全覆盖掉 [3..5) 的旧数据
+        // 3. 填充中间空洞 [5..10)
+        // 4. 覆盖掉第二个 buffer 的头部 [10..12)
+        // 5. 截断第二个 buffer 为 [12..15) "BBB"
+        // 6. 最终尝试合并
+        vbuf.read_from_at(b"CCCCCCCCC", 3);
+
+        // 预期结果:
+        // 0..3: AAA
+        // 3..12: CCCCCCCCC
+        // 12..15: BBB (原 10..15 的 offset 12..15 部分，即后3个字节)
+        // 总共: "AAACCCCCCCCCBBB"
+
+        // 检查内容
+        // 同样，由于首尾相接，应该合并成一个 buffer [0..15)
+        assert_eq!(vbuf.iter_mut().count(), 1);
+        let mut iter = vbuf.iter_mut();
+        let buf = iter.next().unwrap();
+        assert_eq!(buf.remaining(), b"AAACCCCCCCCCBBB");
+    }
+
+    #[compio::test]
+    async fn test_vectored_bridge_gap() {
+        let mut vbuf = VectoredBuffer::new();
+
+        // 1. 左边: [0..5) "AAAAA"
+        vbuf.read_from_at(b"AAAAA", 0);
+        // 2. 右边: [10..15) "BBBBB"
+        vbuf.read_from_at(b"BBBBB", 10);
+
+        assert_eq!(vbuf.iter_mut().count(), 2);
+
+        // 3. 填补中间: [5..10) "CCCCC"
+        // 这应该先与左边合并 -> [0..10)
+        // 然后检测到尾部 10 与右边头部 10 重合 -> 合并右边 -> [0..15)
+        vbuf.read_from_at(b"CCCCC", 5);
+
+        assert_eq!(vbuf.iter_mut().count(), 1, "Should bridge two buffers");
+        let mut iter = vbuf.iter_mut();
+        let buf = iter.next().unwrap();
+        assert_eq!(buf.remaining(), b"AAAAACCCCCBBBBB");
+    }
+
+    #[compio::test]
+    async fn test_buffer_split_and_retain() {
+        // 准备一个 buffer，模拟已经被读取了一部分的情况
+        let mut buf = Buffer::from(b"0123456789".as_slice());
+        buf.advance(2); // pos=2, remaining="23456789"
+
+        // 测试 retain_remaining (保留前部)
+        // range 是相对于 remaining 的。 retain(..3) 意味着保留 "234"
+        let mut buf_copy = buf.clone();
+        buf_copy.retain_remaining(..3);
+        assert_eq!(buf_copy.remaining(), b"234");
+        // 验证 offset 是否正确: 原始 pos=2, 保留3个, 内部 buf 应该变短
+        assert_eq!(buf_copy.get_position(), 2);
+
+        // 测试 retain_remaining (保留后部 / 掐头)
+        // retain(3..) 意味着保留 "56789"
+        let mut buf_copy2 = buf.clone();
+        buf_copy2.retain_remaining(3..);
+        assert_eq!(buf_copy2.remaining(), b"56789");
+        // 此时内部逻辑通常是移动数据或增加 pos。
+        // 你的实现: self.buf_mut().drain(..start + pos);
+        // start=3, pos=2 -> drain(..5). 也就是扔掉前5个字节 (01234)。
+        // 剩下的就是 56789. 新的 pos 应该保持不变或者被 drain 影响?
+        // Vec::drain 会移除元素，所以 pos 应该需要调整吗？
+        // 看你的代码： `self.buf_mut().drain(..start + pos);`
+        // Drain 之后，原来的 index 5 变成了 index 0。
+        // 但是你的 `retain_remaining` 并没有修改 `self.pos`！
+        // 如果 pos 还是 2，而 vec 变短了，可能会导致读取错误或者 panic。
+        // **这里可能是一个潜在 Bug，需要这个测试来验证**。
+    }
+
+    #[compio::test]
+    async fn test_vectored_swallow_entire_buffer() {
+        let mut vbuf = VectoredBuffer::new();
+        // [5..10)
+        vbuf.read_from_at(b"SMALL", 5);
+
+        // 写入 [0..20), 完全包围了 [5..10)
+        vbuf.read_from_at(b"BBBBBBBBBBBBBBBBBBBB", 0);
+
+        assert_eq!(vbuf.iter_mut().count(), 1);
+        let mut iter = vbuf.iter_mut();
+        let buf = iter.next().unwrap();
+        assert_eq!(buf.remaining().len(), 20);
+        assert_eq!(buf.remaining(), b"BBBBBBBBBBBBBBBBBBBB");
     }
 }

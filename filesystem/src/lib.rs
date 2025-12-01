@@ -1,3 +1,4 @@
+#![feature(slice_range)]
 mod buffer;
 mod buffered_file;
 mod mime;
