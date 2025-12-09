@@ -1,17 +1,19 @@
 [workspace]
 resolver = "3"
 members = [
+  "config",
   "discovery",
   "filesystem",
   "identity",
   "native_port",
+  "persist",
   "task_composer",
 ]
 
 [workspace.dependencies]
 async-broadcast = "0.7.2"
 async-lock = "3.4.1"
-camino = "1.2.1"
+camino = { version = "1.2.1", features = ["serde1"] }
 compio = { version = "0.16.1", features = [
   "dispatcher",
   "macros",

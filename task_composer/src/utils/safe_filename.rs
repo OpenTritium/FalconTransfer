@@ -1,9 +1,10 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use fastdate::DateTime;
 use sanitize_filename_reader_friendly::sanitize;
+use serde::{Deserialize, Serialize};
 use std::{borrow::Borrow, fmt, ops::Deref};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SafeFileName(Utf8PathBuf);
 
 impl Deref for SafeFileName {

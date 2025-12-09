@@ -1,7 +1,7 @@
 use crate::{command::NativeCommand, task_info::NativePayload};
 use compio::{
     fs::{Stdin, Stdout, stdin, stdout},
-    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter},
+    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter},
 };
 use std::io;
 

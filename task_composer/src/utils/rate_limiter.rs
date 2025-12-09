@@ -1,5 +1,5 @@
 use crate::WorkerError;
-use arc_swap::ArcSwapOption;
+use arc_swap::{ArcSwapOption, access::Access};
 use compio::bytes::Bytes;
 use governor::{DefaultDirectRateLimiter, InsufficientCapacity, Quota};
 use std::{num::NonZeroU32, sync::Arc};

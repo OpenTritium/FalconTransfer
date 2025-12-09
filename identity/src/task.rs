@@ -10,10 +10,12 @@ static GLOBAL_TASK_ID: AtomicU64 = AtomicU64::new(0);
 pub struct TaskId(u64);
 
 impl TaskId {
+    #[inline]
     pub fn new() -> Self { Self(GLOBAL_TASK_ID.fetch_add(1, Relaxed)) }
 }
 
 impl Default for TaskId {
+    #[inline]
     fn default() -> Self { Self::new() }
 }
 

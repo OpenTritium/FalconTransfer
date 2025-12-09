@@ -1,5 +1,9 @@
 //! UID，内部是 uuidv7 ，在外部做的 base58 序列化增加可读性
-use std::{fmt, ops::Deref, str::FromStr};
+use std::{
+    fmt::{self, Display},
+    ops::Deref,
+    str::FromStr,
+};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -18,7 +22,7 @@ impl Deref for PeerId {
     fn deref(&self) -> &Self::Target { &self.0 }
 }
 
-impl fmt::Display for PeerId {
+impl Display for PeerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = bs58::encode(self.0.as_bytes()).into_string();
         write!(f, "{s}")

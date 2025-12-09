@@ -8,16 +8,18 @@ arc-swap = "1.7.1"
 async-broadcast = { workspace = true }
 camino = { workspace = true }
 compio = { workspace = true }
-see = { workspace = true }
 cyper = { version = "0.6.2", default-features = false, features = [
   "cookies",
   "http2",
   "http3",
-  "nightly",
   # "rustls",
   "native-tls",
+  "nightly",
   "stream",
 ] }
+falcon_config = { path = "../config" }
+falcon_filesystem = { path = "../filesystem" }
+falcon_identity = { path = "../identity" }
 fastdate = "0.3.36"
 flume = { workspace = true }
 futures-util = { workspace = true }
@@ -28,22 +30,21 @@ multipart_async_stream = "0.2.4"
 percent-encoding = "2.3.2"
 regex = "1.11.2"
 sanitize-filename-reader-friendly = "2.3.0"
+see = { workspace = true }
+serde = { workspace = true }
 smol-cancellation-token = "0.1.1"
 sparse_ranges = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 typed-builder = { workspace = true }
-url = { workspace = true }
-
-falcon_identity = { path = "../identity" }
-falcon_filesystem = { path = "../filesystem" }
 ubyte = "0.10.4"
+url = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
-tempfile = { workspace = true }
 rstest = { workspace = true }
+tempfile = { workspace = true }
 
 # [profile.dev]
 # # force-frame-pointers = true

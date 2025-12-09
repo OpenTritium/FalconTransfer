@@ -15,6 +15,7 @@ use compio::{
     fs::{File, OpenOptions},
     runtime::{JoinHandle, spawn},
 };
+use falcon_config::config;
 use falcon_filesystem::assign_path;
 use falcon_identity::task::TaskId;
 use flume as mpmc;
@@ -62,30 +63,27 @@ pub struct TaskDispatcher {
 }
 
 impl TaskDispatcher {
-    const BLOCK_SIZE: usize = 0x100_0000;
-    const DEAFULT_MAX_CONCURRENCY: NonZeroU8 = NonZeroU8::new(8).unwrap();
-    const DEFAULT_MAX_RETRIES: u8 = 32;
-
     #[instrument(skip_all)]
     #[inline]
     pub fn spawn(mut self) -> JoinHandle<()> {
-        spawn(async move {
+        let fut = async move {
             loop {
                 // 当没有worker时，只等待命令
                 if self.workers.is_empty() {
                     self.handle_cmd_res(self.cmd.recv_async().await).await;
-                } else {
-                    select! {
-                        cmd_res = self.cmd.recv_async() => {
-                            self.handle_cmd_res(cmd_res).await;
-                        }
-                        worker_res = self.workers.next() => {
-                            self.handle_worker_res(worker_res).await;
-                        }
+                    continue;
+                }
+                select! {
+                    cmd_res = self.cmd.recv_async() => {
+                        self.handle_cmd_res(cmd_res).await;
+                    }
+                    worker_res = self.workers.next() => {
+                        self.handle_worker_res(worker_res).await;
                     }
                 }
             }
-        })
+        };
+        spawn(fut)
     }
 
     #[inline]
@@ -228,7 +226,7 @@ impl TaskDispatcher {
                 use TaskStateDesc::*;
                 self.pendings.remove(id); // 清理路障
                 if let Some(task) = self.tasks.get_mut(id) {
-                    task.retries_left = Self::DEFAULT_MAX_RETRIES; // 可能是因为尝试次数耗尽导致停止的，所以恢复一下
+                    task.retries_left = config!(worker_max_retries); // 可能是因为尝试次数耗尽导致停止的，所以恢复一下
                     info!("Resume Task {task:?} retry count");
                     // 你不能 resume 一个已经完成的任务和空闲的任务
                     let state = task.status.borrow().state;
@@ -360,9 +358,9 @@ impl TaskDispatcher {
         let task_state = TaskState {
             meta: meta.into(),
             inflight: Default::default(),
-            max_concurrency: Self::DEAFULT_MAX_CONCURRENCY,
+            max_concurrency: config!().worker_max_concurrency,
             current_concurrency: 0,
-            retries_left: Self::DEFAULT_MAX_RETRIES,
+            retries_left: config!(worker_max_retries),
             file,
             cancel: CancellationToken::new(),
             status: tx,
@@ -422,7 +420,7 @@ impl TaskDispatcher {
         let _ = task.status.send_if_modified(|status| status.state.set_running());
         // 如果你支持 range 那我就假定你有 content-range
         let remaining = task.remaining.as_mut().expect("Task supports ranges but have no content range");
-        let blocks = remaining.into_chunks(Self::BLOCK_SIZE).take(more_concurrency as usize);
+        let blocks = remaining.into_chunks(config!(http_block_size)).take(more_concurrency as usize);
         for blk in blocks {
             let fut = Worker::builder()
                 .id(id)

@@ -84,9 +84,13 @@ fn map_status_to_info(status: &TaskStatus) -> TaskInfo {
         Paused => TaskState::Paused { downloaded },
         Completed => TaskState::Completed,
         Cancelled => TaskState::Cancelled,
-        Failed => {
-            TaskState::Failed { last_error: err.as_ref().map(|err| err.to_string()).unwrap_or_default(), downloaded }
-        }
+        Failed => TaskState::Failed {
+            last_error: err
+                .as_ref()
+                .map(|err| err.to_string())
+                .unwrap_or_else(|| "an error should be palced here".to_string()),
+            downloaded,
+        },
     };
     TaskInfo {
         id: *id,

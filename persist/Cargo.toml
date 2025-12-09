@@ -1,0 +1,8 @@
+[package]
+name = "persist"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+falcon_config = { path = "../config" }
+redb = "3.1.0"

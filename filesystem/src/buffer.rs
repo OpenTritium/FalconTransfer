@@ -5,6 +5,7 @@ use compio::{
     buf::{IntoInner, IoBuf, IoBufMut, SetBufInit, Slice},
     io::{AsyncWrite, AsyncWriteAt},
 };
+use falcon_config::config;
 use std::{
     collections::BTreeMap,
     fmt::{self, Debug},
@@ -13,8 +14,6 @@ use std::{
     slice,
 };
 
-pub const DEFAULT_BUF_SIZE: usize = 0x4000;
-pub const MAX_BUF_SIZE: usize = 0x40 * 0x400 * 0x400;
 pub const MISSING_BUF_MSG: &str = "The buffer was submitted for io and never returned";
 
 #[derive(Clone)]
@@ -227,14 +226,15 @@ impl Buffer {
         if try_write_all(self, src) {
             return src.len();
         }
+        let file_buffer_max = config!(file_buffer_max);
         // 在经过整理后缓冲区仍然不够写
         // 如果写入的切片大小 + 缓冲区待写入数据的长度小于最大缓冲区大小，则直接写入（自动按需扩容）
-        if src.len() + self.remaining_len() <= MAX_BUF_SIZE {
+        if src.len() + self.remaining_len() <= file_buffer_max {
             self.buf_mut().extend_from_slice(src);
             return src.len();
         }
         // 写入的切片太大（超过上限了），一次性写不完，这次只写一点，确保不超过上限就行
-        let tobe_written = MAX_BUF_SIZE - self.remaining_len();
+        let tobe_written = file_buffer_max - self.remaining_len();
         self.buf_mut().extend_from_slice(&src[..tobe_written]);
         tobe_written
     }
@@ -348,6 +348,7 @@ impl Debug for Buffer {
 #[derive(Debug)]
 pub struct VectoredBuffer(BTreeMap<usize, Buffer>); // start ,buf
 
+#[must_use]
 pub struct BufferAt<'a> {
     offset: usize,
     buf: &'a mut Buffer,
@@ -474,8 +475,9 @@ impl VectoredBuffer {
         if src.is_empty() {
             return 0;
         }
+        let file_buffer_max = config!(file_buffer_max);
         // 限制单次写入最大长度
-        let write_len = src.len().min(MAX_BUF_SIZE);
+        let write_len = src.len().min(file_buffer_max);
         let partial_src = &src[..write_len];
         let write_end = pos + write_len;
         // 清理重叠区域
@@ -488,7 +490,7 @@ impl VectoredBuffer {
                 let prev_end = prev_key + prev_buf.remaining_len();
                 prev_end == pos
             }
-            && prev_buf.remaining_len() + partial_src.len() <= MAX_BUF_SIZE
+            && prev_buf.remaining_len() + partial_src.len() <= file_buffer_max
         {
             let _ = prev_buf.read_from(partial_src);
             true
@@ -514,10 +516,10 @@ impl VectoredBuffer {
         // 这里的逻辑可以把两个原本断开的 buffer 连起来（填补空洞的情况）
         if let Some(&next_buf_start) = self.0.range(cur_buf_end..).next().map(|(k, _)| k) {
             if next_buf_start == cur_buf_end {
-                // 只有当合并后不超过 MAX_BUF_SIZE 才合并
+                // 只有当合并后不超过 config!(file_buffer_max) 才合并
                 let next_len = self.0.get(&next_buf_start).unwrap().remaining_len();
                 let cur_len = self.0.get(&cur_buf_start).unwrap().remaining_len();
-                if cur_len + next_len <= MAX_BUF_SIZE {
+                if cur_len + next_len <= config!(file_buffer_max) {
                     let next_buf = self.0.remove(&next_buf_start).unwrap();
                     // 拿出数据追加到左边
                     let left_buf = self.0.get_mut(&cur_buf_start).unwrap();

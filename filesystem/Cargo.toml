@@ -8,6 +8,7 @@ camino = { workspace = true }
 compio = { workspace = true }
 criterion = { workspace = true }
 directories = "6.0.0"
+falcon_config = { path = "../config" }
 futures-util = { workspace = true }
 mime = { workspace = true }
 sparse_ranges = { workspace = true }

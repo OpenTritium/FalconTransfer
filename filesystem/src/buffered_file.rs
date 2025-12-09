@@ -1,18 +1,16 @@
-use crate::buffer::{self, Buffer, VectoredBuffer};
+use crate::buffer::{Buffer, VectoredBuffer};
 use compio::{
     BufResult,
     buf::{IoBuf, IoVectoredBuf, buf_try},
     fs::File,
     io::{AsyncWrite, AsyncWriteAt},
 };
+use falcon_config::config;
 use sparse_ranges::RangeSet;
 use std::{
     io::{self, Cursor},
     mem,
 };
-
-pub const MAX_BUF_SIZE: usize = 0x40 * 0x400 * 0x400;
-pub const BASE_BUF_SIZE: usize = buffer::DEFAULT_BUF_SIZE;
 
 pub struct SeqBufFile {
     file: Cursor<File>,
@@ -30,7 +28,7 @@ impl SeqBufFile {
             file: cursor,
             buffered: RangeSet::new(),
             flushed: RangeSet::new(),
-            buf: Buffer::with_capacity(BASE_BUF_SIZE),
+            buf: Buffer::with_capacity(config!(file_buffer_base)),
         }
     }
 
@@ -58,16 +56,17 @@ impl SeqBufFile {
         if let Some(chunk_size) = next_chunk
             && {
                 let new_remaining = self.buf.remaining_len() + chunk_size;
-                new_remaining > MAX_BUF_SIZE
+                new_remaining > config!(file_buffer_max)
             }
         {
             self.flush().await?;
             return Ok(());
         }
+        let file_buffer_base = config!(file_buffer_base);
         // 托底的回收方法
-        if self.buf.remaining_len() > BASE_BUF_SIZE {
+        if self.buf.remaining_len() > file_buffer_base {
             self.flush().await?;
-            self.buf.shrink_to_limit(BASE_BUF_SIZE);
+            self.buf.shrink_to_limit(file_buffer_base);
         }
         Ok(())
     }
@@ -165,11 +164,12 @@ impl RandBufFile {
             return Ok(());
         }
         // 尽量将每个 buf 回收到基础大小
-        if self.vbuf.total_remaining_len() > BASE_BUF_SIZE {
+        let file_buffer_base = config!(file_buffer_base);
+        if self.vbuf.total_remaining_len() > file_buffer_base {
             self.flush().await?;
             self.vbuf.release_done();
             self.vbuf.compact_all();
-            self.vbuf.shrink_all_to_limit(BASE_BUF_SIZE);
+            self.vbuf.shrink_all_to_limit(file_buffer_base);
         }
         Ok(())
     }
@@ -255,23 +255,23 @@ mod file_tests {
         let file = OpenOptions::new().create_new(true).write(true).open(&path).await.unwrap();
         let mut seq_file = SeqBufFile::from(file);
         let first_chunk = vec![1u8; 10_000]; // 第一块要小于 BASE_BUF_SIZE
-        let second_chunk = vec![1u8; MAX_BUF_SIZE - 10_000]; // 第二个块大于 BASE 但小于 MAX
-        let third_chunk = vec![1u8; MAX_BUF_SIZE]; // 巨无霸
+        let second_chunk = vec![1u8; config!(file_buffer_max) - 10_000]; // 第二个块大于 BASE 但小于 MAX
+        let third_chunk = vec![1u8; config!(file_buffer_max)]; // 巨无霸
         let (written, _) = seq_file.write(first_chunk).await.unwrap();
         assert_eq!(written, 10_000);
         assert!(seq_file.flushed_range().is_empty()); // 此时应该没有 flush
         // 第二次写入，此时会提前前瞻性 flush，然后写入最大量，然后继续 flush
         let (written, _) = seq_file.write(second_chunk).await.unwrap();
-        assert_eq!(written, MAX_BUF_SIZE - 10_000); // 第二个块被全部写入了
-        assert_eq!(seq_file.flushed_range().len(), MAX_BUF_SIZE);
+        assert_eq!(written, config!(file_buffer_max) - 10_000); // 第二个块被全部写入了
+        assert_eq!(seq_file.flushed_range().len(), config!(file_buffer_max));
         seq_file.flush().await.unwrap();
         let (bytes_read, buf) = read_all_at(&path, 0).await;
-        assert_eq!(bytes_read, MAX_BUF_SIZE);
+        assert_eq!(bytes_read, config!(file_buffer_max));
         assert!(buf.iter().all(|&n| n == 1));
         let (written, _) = seq_file.write(third_chunk).await.unwrap(); // 只能写入最大值
-        assert_eq!(written, MAX_BUF_SIZE);
-        assert_eq!(seq_file.flushed_range().len(), MAX_BUF_SIZE * 2);
-        assert_eq!(seq_file.buffered_range().len(), MAX_BUF_SIZE * 2);
+        assert_eq!(written, config!(file_buffer_max));
+        assert_eq!(seq_file.flushed_range().len(), config!(file_buffer_max) * 2);
+        assert_eq!(seq_file.buffered_range().len(), config!(file_buffer_max) * 2);
     }
 
     #[compio::test]
@@ -368,7 +368,7 @@ mod file_tests {
 
         // 构造足够多的数据来触发 flush_if_needed 的托底逻辑 (> BASE_BUF_SIZE)
         // 使用多个小块，确保 VectoredBuffer 内部创建多个 Buffer
-        let chunk_size = BASE_BUF_SIZE / 4;
+        let chunk_size = config!(file_buffer_base) / 4;
         let num_chunks = 5; // 5 * (BASE_BUF_SIZE/4) > BASE_BUF_SIZE
 
         // 1. 连续写入多个不重叠的小块
@@ -681,20 +681,20 @@ mod file_tests {
         assert_eq!(seq_file.flushed_range().len(), 0);
 
         // 写入大块数据，应触发 auto flush
-        let large_chunk = vec![2u8; MAX_BUF_SIZE];
+        let large_chunk = vec![2u8; config!(file_buffer_max)];
         seq_file.write(large_chunk).await.unwrap();
 
         // 因为前瞻性 flush，第一块和部分第二块应该被 flush
-        assert_eq!(seq_file.buffered_range().len(), 1000 + MAX_BUF_SIZE);
-        assert_eq!(seq_file.flushed_range().len(), 1000 + MAX_BUF_SIZE);
+        assert_eq!(seq_file.buffered_range().len(), 1000 + config!(file_buffer_max));
+        assert_eq!(seq_file.flushed_range().len(), 1000 + config!(file_buffer_max));
 
         seq_file.shutdown().await.unwrap();
 
         // 验证文件内容
         let (bytes_read, buf) = read_all_at(&path, 0).await;
-        assert_eq!(bytes_read, 1000 + MAX_BUF_SIZE);
+        assert_eq!(bytes_read, 1000 + config!(file_buffer_max));
         assert!(buf[0..1000].iter().all(|&b| b == 1));
-        assert!(buf[1000..1000 + MAX_BUF_SIZE].iter().all(|&b| b == 2));
+        assert!(buf[1000..1000 + config!(file_buffer_max)].iter().all(|&b| b == 2));
     }
 
     #[compio::test]
@@ -705,7 +705,7 @@ mod file_tests {
         let mut rand_file = RandBufFile::from(file);
 
         // 写入多个小块，累积超过 BASE_BUF_SIZE
-        let chunk_size = BASE_BUF_SIZE / 3;
+        let chunk_size = config!(file_buffer_base) / 3;
 
         // 第一块
         let chunk1 = vec![1u8; chunk_size];

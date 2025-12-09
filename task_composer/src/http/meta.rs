@@ -72,7 +72,7 @@ impl From<Response> for HttpTaskMeta {
 impl fmt::Display for HttpTaskMeta {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Meta['{}']", self.name)?;
-
+        // todo 换算
         if let Some(size) = self.size {
             let size_str = if size >= 1_073_741_824 {
                 format!("{:.2} GB", size as f64 / 1_073_741_824.0)
