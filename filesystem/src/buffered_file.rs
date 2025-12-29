@@ -33,10 +33,10 @@ impl SeqBufFile {
     }
 
     #[inline]
-    pub fn buffered_range(&self) -> &RangeSet { &self.buffered }
+    pub const fn buffered_range(&self) -> &RangeSet { &self.buffered }
 
     #[inline]
-    pub fn flushed_range(&self) -> &RangeSet { &self.flushed }
+    pub const fn flushed_range(&self) -> &RangeSet { &self.flushed }
 
     #[inline]
     pub fn into_flushed_range(mut self) -> RangeSet { mem::take(&mut self.flushed) }
@@ -139,10 +139,10 @@ impl RandBufFile {
     }
 
     #[inline]
-    pub fn buffered_range(&self) -> &RangeSet { &self.buffered }
+    pub const fn buffered_range(&self) -> &RangeSet { &self.buffered }
 
     #[inline]
-    pub fn flushed_range(&self) -> &RangeSet { &self.flushed }
+    pub const fn flushed_range(&self) -> &RangeSet { &self.flushed }
 
     #[inline]
     pub fn into_flushed_range(mut self) -> RangeSet { mem::take(&mut self.flushed) }
@@ -409,7 +409,7 @@ mod file_tests {
         // Part2 是空的，测试空切片跳过逻辑
         let (written, _) = seq_file.write_vectored(parts).await.unwrap();
 
-        assert_eq!(written, 5 + 0 + 5 + 5);
+        assert_eq!(written, 5 + 5 + 5);
         seq_file.flush().await.unwrap();
 
         let (bytes_read, buf) = read_all_at(&path, 0).await;

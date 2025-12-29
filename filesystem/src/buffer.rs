@@ -25,11 +25,11 @@ pub struct Inner {
 impl Inner {
     /// Returns true if the buffer is empty.
     #[inline]
-    fn all_done(&self) -> bool { self.buf.len() == self.pos }
+    const fn all_done(&self) -> bool { self.buf.len() == self.pos }
 
     /// 缓冲区是否有数据（不论是否被处理）
     #[inline]
-    fn is_empty(&self) -> bool { self.buf.is_empty() }
+    const fn is_empty(&self) -> bool { self.buf.is_empty() }
 
     /// Move pos & init needle to 0
     #[inline]
@@ -84,10 +84,10 @@ impl Buffer {
     pub fn with_capacity(cap: usize) -> Self { Self(Inner { buf: Vec::with_capacity(cap), pos: 0 }.into()) }
 
     #[inline]
-    pub fn get_position(&self) -> usize { self.inner().pos }
+    pub const fn get_position(&self) -> usize { self.inner().pos }
 
     #[inline]
-    pub fn set_position(&mut self, pos: usize) { self.inner_mut().pos = pos; }
+    pub const fn set_position(&mut self, pos: usize) { self.inner_mut().pos = pos; }
 
     /// Get the initialized but not consumed part of the buffer.
     #[inline]
@@ -122,20 +122,20 @@ impl Buffer {
         let pos = self.get_position();
         let inner = self.buf_mut();
         let right = inner.split_off(pos + at);
-        Buffer::from(right)
+        Self::from(right)
     }
 
     /// If the inner buffer is empty.
     #[inline]
-    pub fn is_empty(&self) -> bool { self.inner().is_empty() }
+    pub const fn is_empty(&self) -> bool { self.inner().is_empty() }
 
     /// All bytes in the buffer have been read
     #[inline]
-    pub fn all_done(&self) -> bool { self.inner().all_done() }
+    pub const fn all_done(&self) -> bool { self.inner().all_done() }
 
     /// Returns the capacity of the uninitialized part of the buffer (`capacity() - len()`).
     #[inline]
-    pub fn uninitialized_capacity(&self) -> usize { self.buf().capacity() - self.buf().len() }
+    pub const fn uninitialized_capacity(&self) -> usize { self.buf().capacity() - self.buf().len() }
 
     /// Clear the inner buffer and reset the position to the start.
     #[inline]
@@ -287,11 +287,11 @@ impl Buffer {
 
     #[inline]
     #[must_use]
-    fn from_inner(inner: Inner) -> Self { Self(Some(inner)) }
+    const fn from_inner(inner: Inner) -> Self { Self(Some(inner)) }
 
     #[inline]
     #[must_use]
-    fn take_inner(&mut self) -> Inner { self.0.take().expect(MISSING_BUF_MSG) }
+    const fn take_inner(&mut self) -> Inner { self.0.take().expect(MISSING_BUF_MSG) }
 
     #[inline]
     fn restore_inner(&mut self, buf: Inner) {
@@ -301,24 +301,24 @@ impl Buffer {
 
     #[inline]
     #[must_use]
-    fn inner(&self) -> &Inner { self.0.as_ref().expect(MISSING_BUF_MSG) }
+    const fn inner(&self) -> &Inner { self.0.as_ref().expect(MISSING_BUF_MSG) }
 
     #[inline]
     #[must_use]
-    fn inner_mut(&mut self) -> &mut Inner { self.0.as_mut().expect(MISSING_BUF_MSG) }
+    const fn inner_mut(&mut self) -> &mut Inner { self.0.as_mut().expect(MISSING_BUF_MSG) }
 
     #[inline]
     #[must_use]
-    fn buf(&self) -> &Vec<u8> { &self.inner().buf }
+    const fn buf(&self) -> &Vec<u8> { &self.inner().buf }
 
     #[inline]
     #[must_use]
-    fn buf_mut(&mut self) -> &mut Vec<u8> { &mut self.inner_mut().buf }
+    const fn buf_mut(&mut self) -> &mut Vec<u8> { &mut self.inner_mut().buf }
 
     /// 作为左半部分连接 other buffer
     /// 会先将 other compact 一下再 append
     #[inline]
-    fn left_join(&mut self, mut other: Buffer) {
+    fn left_join(&mut self, mut other: Self) {
         other.compact();
         self.buf_mut().append(other.buf_mut());
     }
@@ -373,7 +373,7 @@ impl Default for VectoredBuffer {
 
 impl VectoredBuffer {
     #[inline]
-    pub fn new() -> Self { Self(BTreeMap::new()) }
+    pub const fn new() -> Self { Self(BTreeMap::new()) }
 
     #[inline]
     pub fn iter_mut(&mut self) -> impl Iterator<Item = BufferAt<'_>> {
@@ -438,7 +438,7 @@ impl VectoredBuffer {
         // 打洞
         for buf_start in to_process {
             // 弹出旧 buffer
-            let mut buf = self.0.remove(&buf_start).unwrap();
+            let mut buf = self.0.remove(&buf_start).expect("Old buf not exists");
             let buf_len = buf.remaining_len();
             debug_assert_ne!(buf_len, 0);
             let buf_end = buf_start + buf_len;
@@ -514,17 +514,18 @@ impl VectoredBuffer {
         // 尝试右合并 (Merge Right/Bridging)
         // 检查 current_buf_end 位置是否刚好是下一个 buffer 的开始
         // 这里的逻辑可以把两个原本断开的 buffer 连起来（填补空洞的情况）
-        if let Some(&next_buf_start) = self.0.range(cur_buf_end..).next().map(|(k, _)| k) {
-            if next_buf_start == cur_buf_end {
-                // 只有当合并后不超过 config!(file_buffer_max) 才合并
-                let next_len = self.0.get(&next_buf_start).unwrap().remaining_len();
-                let cur_len = self.0.get(&cur_buf_start).unwrap().remaining_len();
-                if cur_len + next_len <= config!(file_buffer_max) {
-                    let next_buf = self.0.remove(&next_buf_start).unwrap();
-                    // 拿出数据追加到左边
-                    let left_buf = self.0.get_mut(&cur_buf_start).unwrap();
-                    left_buf.left_join(next_buf);
-                }
+        // 只有当合并后不超过 config!(file_buffer_max) 才合并
+        if let Some(&next_buf_start) = self.0.range(cur_buf_end..).next().map(|(k, _)| k)
+            && next_buf_start == cur_buf_end
+        {
+            let next_len =
+                self.0.get(&next_buf_start).expect("next buffer should exist after range check").remaining_len();
+            let cur_len = self.0.get(&cur_buf_start).expect("current buffer should exist").remaining_len();
+            if cur_len + next_len <= config!(file_buffer_max) {
+                let next_buf = self.0.remove(&next_buf_start).expect("next buffer should still exist when removing");
+                // 拿出数据追加到左边
+                let left_buf = self.0.get_mut(&cur_buf_start).expect("current buffer should still exist when merging");
+                left_buf.left_join(next_buf);
             }
         }
         write_len

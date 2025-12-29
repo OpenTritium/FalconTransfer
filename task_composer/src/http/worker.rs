@@ -1,4 +1,6 @@
-//! Worker 被设计为 ThreadLocal 的, 只向本地的调度器汇报工作
+//! Workers are designed to be ThreadLocal and only report work to their local dispatcher.
+//! A worker may partially complete work, fully complete work, or fail to complete work (due to errors).
+//! Rollback typically occurs when work proceeds normally but some slices are missing at the end.
 use crate::{
     http::{
         header_map_ext::{HeaderMapExt, HeaderMapExtError},
@@ -9,107 +11,142 @@ use crate::{
 };
 use WorkerError::*;
 use compio::{
+    BufResult,
     fs::File,
     io::{AsyncWrite, AsyncWriteAtExt, AsyncWriteExt},
     runtime::{JoinHandle, spawn},
     time::timeout,
 };
 use cyper::Client;
+use falcon_config::config;
 use falcon_filesystem::{RandBufFile, SeqBufFile};
 use falcon_identity::task::TaskId;
-use futures_util::{FutureExt, StreamExt, TryStreamExt, select, select_biased};
+use futures_util::{StreamExt, TryStreamExt};
 use multipart_async_stream::{LendingIterator, MultipartStream};
 use see::sync as watch;
 use smol_cancellation_token::CancellationToken;
 use sparse_ranges::{FrozenRangeSet, Range, RangeSet};
 use std::{sync::LazyLock, time::Duration};
 use thiserror::Error;
-use tracing::{Level, instrument, span, warn};
+use tracing::{debug, instrument, warn};
 use typed_builder::TypedBuilder;
 use url::Url;
 
-pub static GLOBAL_HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
+/// Macro to handle errors with cleanup (shutdown + progress update) before returning.
+macro_rules! cleanup_then_fail {
+    ($file:expr, $status:expr, $id:expr, $err:expr, $assigned:expr) => {{
+        let _ = $file.shutdown().await;
+        Self::update_progress($status, $file.buffered_range(), $file.flushed_range());
+        return Err(Self::make_failed($id, $err, $assigned));
+    }};
+}
 
+pub static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
+
+/// Worker thread responsible for downloading specific range of a file.
+///
+/// Thread-local design reporting only to local dispatcher.
+/// Handles three download modes:
+/// - **Any mode**: Unknown file size, continuous download
+/// - **Continuous mode**: Known file size, single range download
+/// - **Sparse mode**: Known file size, multi-range (multipart) download
 #[derive(Debug, TypedBuilder)]
 pub struct Worker {
+    /// Unique task identifier
     id: TaskId,
+    /// Download URL
     url: Url,
+    /// File handle (supports random or sequential access)
     file: File,
+    /// Channel to report download progress to dispatcher
     status: watch::Sender<TaskStatus>,
+    /// Token to receive cancellation requests
     child_cancel: CancellationToken,
+    /// Rate limiter controlling download speed
     rate_limit: SharedRateLimiter,
+    /// Optional assigned range(s). `None` means download entire file.
     #[builder(default, setter(strip_option))]
     assign: Option<FrozenRangeSet>,
 }
 
 #[derive(Debug, Error)]
 pub enum WorkerError {
-    #[error("reqwest internal error: {0}")]
+    #[error("Failed to send HTTP request")]
     CyperInternal(#[from] cyper::Error),
-    #[error("header map process error: {0}")]
+    #[error("Failed to parse HTTP response headers")]
     HeaderExt(#[from] HeaderMapExtError),
-    #[error("partial download range: {0:?}")]
-    ParitalDownloaded(RangeSet),
-    #[error("multipart stream error: {0}")]
+    #[error("Downloaded ranges do not match assigned ranges")]
+    ParitalDownloaded(RangeSet), // Not using FrozenRangeSet to avoid an extra conversion
+    #[error("Failed to parse multipart response stream")]
     MultiPartStream(#[from] multipart_async_stream::Error),
-    #[error("token bucket capacity insufficient: {0}")]
+    #[error("Rate limit exceeded")]
     RateLimit(#[from] governor::InsufficientCapacity),
-    #[error("file opt error: {0}")]
+    #[error("Failed to write to file")]
     File(#[from] std::io::Error),
-    #[error("initiate cancel")]
+    #[error("Worker was cancelled")]
     InitiateCancel,
-    #[error("recved chunk size {0} is greater than u32::MAX")]
+    #[error("HTTP response chunk exceeds maximum allowed size: {0} bytes")]
     ChunkTooLarge(usize),
-    #[error("timeout")]
+    #[error("Operation timed out")]
     Timeout,
-    #[error("this worker has a empty assigned range")]
+    #[error("Worker assigned empty download range")]
     EmptyRange,
+    #[error("Previous error was not logged before shutdown")]
+    PreviousUnlogged,
+    #[error("Downloaded ranges are not continuous")]
+    NotContinuous,
 }
 
 #[derive(Debug)]
+#[must_use]
 pub struct WorkSuccess {
     pub id: TaskId,
-    pub downloaded: RangeSet,
+    /// Ranges that have been flushed to disk
+    pub flushed: RangeSet,
 }
 
 #[derive(Debug, TypedBuilder)]
+#[must_use]
 pub struct WorkFailed {
     pub id: TaskId,
+    /// Ranges that were assigned to this worker
     #[builder(default, setter(strip_option))]
-    pub revert: Option<RangeSet>,
+    pub assigned: Option<RangeSet>,
     pub err: WorkerError,
 }
 
-pub type WorkerResult = Result<WorkSuccess, Box<WorkFailed>>;
+pub type WorkerResult = Result<WorkSuccess, WorkFailed>;
 pub type WorkerFuture = JoinHandle<WorkerResult>;
-type InnerResult = Result<RangeSet, WorkerError>;
 
 impl Worker {
-    // todo：修改超时机制
-    const WORKER_TIMEOUT: Duration = Duration::from_mins(3);
+    /// Creates `WorkFailed` error with optional assigned range.
+    #[inline]
+    fn make_failed(id: TaskId, err: WorkerError, assigned: Option<RangeSet>) -> WorkFailed {
+        let builder = WorkFailed::builder().id(id).err(err);
+        match assigned {
+            Some(range) => builder.assigned(range).build(),
+            None => builder.build(),
+        }
+    }
 
-    #[instrument(skip(self), fields(id = ?self.id, range = ?self.assign))]
+    #[instrument(skip(self), fields(id = %self.id, range = ?self.assign))]
     pub fn spawn(self) -> WorkerFuture {
-        let mk_err = move |err| Box::new(WorkFailed::builder().id(self.id).err(err).build());
-        let mut timeout_err = mk_err(Timeout);
-        timeout_err.revert = self.assign.clone().map(Into::into);
+        let timeout_err = Self::make_failed(self.id, Timeout, self.assign.clone().map(Into::into));
         let fut = async move {
             match self.assign {
-                // 检查是否被分配分配了空 range，直接返回错误
-                Some(ref rng) if rng.is_empty() => Err(mk_err(EmptyRange)),
-                // 如果只有一个 range，直接连续下载
+                Some(ref rng) if rng.is_empty() => Err(Self::make_failed(self.id, EmptyRange, None)),
                 Some(ref rng) if rng.ranges_count() == 1 => self.download_continuous().await,
-                // 多个 range 就稀疏下载
                 Some(_) => self.download_spare().await,
-                // 应对不知道 content-length 的情况
                 None => self.download_any().await,
             }
         };
-        spawn(async move { timeout(Self::WORKER_TIMEOUT, fut).await.map_err(|_| timeout_err).flatten() })
+        let timeout_dur = Duration::from_mins(config!(worker_timeout_mins) as u64);
+        spawn(async move { timeout(timeout_dur, fut).await.map_err(|_| timeout_err).flatten() })
     }
 
+    /// Updates task status by merging new buffered and flushed ranges.
     #[inline]
-    fn update_progress(status: &mut watch::Sender<TaskStatus>, new_buffered: &RangeSet, new_flushed: &RangeSet) {
+    fn update_progress(status: &watch::Sender<TaskStatus>, new_buffered: &RangeSet, new_flushed: &RangeSet) {
         status.send_modify(|s| {
             let TaskStatus { buffered, flushed, .. } = s;
             *buffered |= new_buffered;
@@ -117,163 +154,208 @@ impl Worker {
         });
     }
 
-    #[instrument(skip_all)]
-    async fn download_any_impl(
-        url: Url, file: File, rate_limit: SharedRateLimiter, mut status: watch::Sender<TaskStatus>,
-    ) -> InnerResult {
-        let span = span!(Level::INFO, "download_any_impl", url = %url);
-        let resp = GLOBAL_HTTP_CLIENT.get(url)?.send().await?;
-        let mut strm = resp.bytes_stream();
-        let mut file = SeqBufFile::from(file);
-        let guard = span.entered();
-        while let Some(body_res) = strm.next().await {
-            let body = body_res?;
-            rate_limit.acquire(body.token()?).await?;
-            file.write_all(body).await.0?;
-            Self::update_progress(&mut status, file.buffered_range(), file.flushed_range());
-        }
-        file.shutdown().await?;
-        Self::update_progress(&mut status, file.buffered_range(), file.flushed_range());
-        guard.exit();
-        Ok(file.into_flushed_range())
-    }
-
-    /// 用于不知道目标文件大小的下载。
-    /// 通常用于需要单线程下载或不知道目标大小的文件，降级到使用单个 worker 并使用 download_any 下载。
-    /// 对于此函数，如果成功总是返回成功下载的 range, 如果失败则返回 None 与 错误
-    #[instrument(skip_all)]
+    /// Downloads file when target size is unknown.
+    ///
+    /// Used for single-threaded downloads or when file size cannot be determined.
+    #[instrument(name = "worker.any", skip(self), fields(task_id = %self.id, url = %self.url))]
     async fn download_any(self) -> WorkerResult {
-        let mk_err = move |err| Box::new(WorkFailed::builder().id(self.id).err(err).build());
-        let handle_res =
-            |res: InnerResult| res.map(|downloaded| WorkSuccess { id: self.id, downloaded }).map_err(mk_err);
-        select! {
-            res = Self::download_any_impl(self.url, self.file, self.rate_limit, self.status).fuse() => {
-                handle_res(res)
-            }
-            _ = self.child_cancel.cancelled().fuse() => {
-                Err(mk_err(InitiateCancel))
-            }
-        }
-    }
-
-    /// 用于知道目标文件大小的下载实现，返回的时候需要检查范围
-    #[instrument(skip_all)]
-    async fn download_continuous_impl(
-        full: &FrozenRangeSet, url: Url, file: File, rate_limit: SharedRateLimiter,
-        mut status: watch::Sender<TaskStatus>,
-    ) -> InnerResult {
-        // 实际上 spawn 里保证了了 full 至少包含一个 range
-        let start = full.start().unwrap() as u64;
-        let resp = GLOBAL_HTTP_CLIENT
-            .get(url)?
-            .header("Range", full.to_http_range_header().unwrap().to_string())? // 所以这里也不会 panic，看上面的注释
+        debug!("Starting download with unknown file size");
+        let resp = HTTP_CLIENT
+            .get(self.url)
+            .map_err(|e| Self::make_failed(self.id, e.into(), None))?
             .send()
-            .await?;
-        let mut strm = resp.bytes_stream();
-        let mut file = SeqBufFile::with_position(file, start);
-        while let Some(body_res) = strm.next().await {
-            let body = body_res?;
-            rate_limit.acquire(body.token()?).await?;
-            file.write_all(body).await.0?;
-            Self::update_progress(&mut status, file.buffered_range(), file.flushed_range());
-        }
-        file.shutdown().await?;
-        Self::update_progress(&mut status, file.buffered_range(), file.flushed_range());
-        Ok(file.into_flushed_range())
-    }
-
-    /// 稀疏和连续通用，用于检测出worker正常执行完但没有下载成功的部分
-    #[instrument(skip_all)]
-    fn handle_ranged_result(id: TaskId, full: FrozenRangeSet, res: InnerResult) -> WorkerResult {
-        res.and_then(|flushed| {
-            if flushed != full {
-                Err(ParitalDownloaded(flushed))
-            } else {
-                Ok(flushed)
+            .await
+            .map_err(|e| Self::make_failed(self.id, e.into(), None))?;
+        let mut byte_stream = resp.bytes_stream();
+        let mut file = SeqBufFile::from(self.file);
+        while let Some(body_res) = byte_stream.next().await {
+            if self.child_cancel.is_cancelled() {
+                cleanup_then_fail!(file, &self.status, self.id, InitiateCancel, None);
             }
-        })
-        .map(|downloaded| WorkSuccess { id, downloaded })
-        .map_err(|err| Box::new(WorkFailed::builder().id(id).revert(full.into()).err(err).build()))
+            let body = match body_res {
+                Ok(b) => b,
+                Err(e) => cleanup_then_fail!(file, &self.status, self.id, e.into(), None),
+            };
+            let tokens = match body.tokens() {
+                Ok(t) => t,
+                Err(e) => cleanup_then_fail!(file, &self.status, self.id, e, None),
+            };
+            if let Err(e) = self.rate_limit.acquire(tokens).await {
+                cleanup_then_fail!(file, &self.status, self.id, e.into(), None);
+            }
+            if let BufResult(Err(e), _) = file.write_all(body).await {
+                cleanup_then_fail!(file, &self.status, self.id, e.into(), None);
+            }
+            Self::update_progress(&self.status, file.buffered_range(), file.flushed_range());
+        }
+        if let Err(e) = file.shutdown().await {
+            cleanup_then_fail!(file, &self.status, self.id, e.into(), None);
+        }
+        let flushed = file.into_flushed_range();
+        Self::update_progress(&self.status, &flushed, &flushed);
+        // download_any is for unknown file size, success with continuous download (ranges_count() == 1)
+        if flushed.ranges_count() > 1 {
+            return Err(Self::make_failed(self.id, NotContinuous, flushed.into()));
+        }
+        if flushed.is_empty() {
+            return Err(Self::make_failed(self.id, EmptyRange, None));
+        }
+        Ok(WorkSuccess { id: self.id, flushed })
     }
 
-    /// 用于一个连续的文件切片下载，调用此函数时假设 range 不为空
-    /// 此函数成功时返回成功下载的范围，失败时返回取消提交的范围和错误
-    #[instrument(skip_all)]
+    /// Downloads continuous range of the file.
+    ///
+    /// # Preconditions
+    ///
+    /// Assigned range must be non-empty and contain exactly one continuous range.
+    /// Guaranteed by `spawn()` dispatch logic.
+    #[instrument(name = "worker.continuous", skip(self), fields(task_id = %self.id, url = %self.url, range = ?self.assign))]
     async fn download_continuous(self) -> WorkerResult {
-        // 实际上 spawn 里保证了了 full 至少包含一个 range
-        let full = self.assign.unwrap();
-        let cancel_err =
-            || Err(Box::new(WorkFailed::builder().id(self.id).revert(full.clone().into()).err(InitiateCancel).build()));
-        select_biased! {
-            res = Self::download_continuous_impl(&full, self.url, self.file, self.rate_limit, self.status).fuse() => {
-                Self::handle_ranged_result(self.id, full, res)
-            }
-            _ = self.child_cancel.cancelled().fuse() => {
-                cancel_err()
-            }
-        }
-    }
-
-    #[instrument(skip_all)]
-    async fn download_spare_impl(
-        full: &FrozenRangeSet, url: Url, file: File, rate_limit: SharedRateLimiter,
-        mut status: watch::Sender<TaskStatus>,
-    ) -> InnerResult {
-        let resp = GLOBAL_HTTP_CLIENT
-            .get(url)?
-            .header("Range", full.to_http_range_header().unwrap().to_string())? // 保证了至少两个 range
+        let assigned = self.assign.expect("Assign is Some by spawn() guarantee");
+        let start = assigned.start().expect("Range is non-empty by spawn() guarantee") as u64;
+        debug!("Starting continuous download for range");
+        let range_header =
+            assigned.to_http_range_header().expect("Range header valid for non-empty ranges").to_string();
+        let resp = HTTP_CLIENT
+            .get(self.url)
+            .map_err(|e| Self::make_failed(self.id, e.into(), Some(assigned.clone().into())))?
+            .header("Range", range_header)
+            .map_err(|e| Self::make_failed(self.id, e.into(), Some(assigned.clone().into())))?
             .send()
-            .await?;
-        let bnd = resp.headers().parse_boundary()?;
-        let strm = resp.bytes_stream();
-        let mut multipart = MultipartStream::new(strm, &bnd);
-        let mut file = RandBufFile::new(file);
-        while let Some(part_res) = multipart.next().await {
-            let part = part_res?;
-            let hdr = part.headers();
-            let (part_full, _) = hdr.parse_single_content_range()?;
-            if !full.contains(&part_full) {
-                warn!("part {part_full:?} is not in the assigned range in {full:?}");
-                continue; // 如果这个 part 的范围不在被分配的范围中，则跳过
+            .await
+            .map_err(|e| Self::make_failed(self.id, e.into(), Some(assigned.clone().into())))?;
+        let mut byte_stream = resp.bytes_stream();
+        let mut file = SeqBufFile::with_position(self.file, start);
+        while let Some(body_res) = byte_stream.next().await {
+            if self.child_cancel.is_cancelled() {
+                cleanup_then_fail!(file, &self.status, self.id, InitiateCancel, Some(assigned.into()));
             }
-            let mut body_strm = part.body();
-            let cur = part_full.start(); // 每个part 的起始位置，然后随着body 流的写入这个也开始偏移
-            while let Ok(Some(payload)) = body_strm.try_next().await {
-                if payload.is_empty() {
-                    warn!("empty payload"); // 但平时这种情况真的少吧
-                    continue; // 这是为了防止 rng 计算错误
-                }
-                //
-                let recved = unsafe { Range::new_unchecked(cur, cur + payload.len() - 1) };
-                if !part_full.contains(&recved) {
-                    warn!("part slice {recved:?} is not in the part range in {part_full:?}");
-                    continue; // 如果这个 part 的某个块不在 这个 part 范围中也跳过
-                }
-                rate_limit.acquire(payload.token()?).await?;
-                file.write_all_at(payload, cur as u64).await.0?;
-                Self::update_progress(&mut status, file.buffered_range(), file.flushed_range());
+            let body = match body_res {
+                Ok(b) => b,
+                Err(e) => cleanup_then_fail!(file, &self.status, self.id, e.into(), Some(assigned.into())),
+            };
+            let tokens = match body.tokens() {
+                Ok(t) => t,
+                Err(e) => cleanup_then_fail!(file, &self.status, self.id, e, Some(assigned.into())),
+            };
+            if let Err(e) = self.rate_limit.acquire(tokens).await {
+                cleanup_then_fail!(file, &self.status, self.id, RateLimit(e), Some(assigned.into()));
             }
-            file.shutdown().await?;
+            if let BufResult(Err(e), _) = file.write_all(body).await {
+                cleanup_then_fail!(file, &self.status, self.id, File(e), Some(assigned.into()));
+            }
+            Self::update_progress(&self.status, file.buffered_range(), file.flushed_range());
         }
-        Self::update_progress(&mut status, file.buffered_range(), file.flushed_range());
-        Ok(file.into_flushed_range())
+        if let Err(e) = file.shutdown().await {
+            cleanup_then_fail!(file, &self.status, self.id, File(e), Some(assigned.into()));
+        }
+        let flushed = file.into_flushed_range();
+        Self::update_progress(&self.status, &flushed, &flushed);
+        if flushed != assigned {
+            return Err(Self::make_failed(self.id, ParitalDownloaded(flushed), Some(assigned.into())));
+        }
+        Ok(WorkSuccess { id: self.id, flushed })
     }
 
-    /// 用于稀疏文件切片下载
-    #[instrument(skip_all)]
+    /// Downloads sparse ranges using multipart requests.
+    ///
+    /// # Preconditions
+    ///
+    /// Assigned range must contain at least two separate ranges.
+    /// Guaranteed by `spawn()` dispatch logic.
+    #[instrument(name = "worker.sparse", skip(self), fields(task_id = %self.id, url = %self.url, range = ?self.assign))]
     async fn download_spare(self) -> WorkerResult {
-        // spawn 里保证至少包含两个 range
-        let full = self.assign.unwrap();
-        let cancel_err =
-            || Err(Box::new(WorkFailed::builder().id(self.id).revert(full.clone().into()).err(InitiateCancel).build()));
-
-        select_biased! {
-            res = Self::download_spare_impl(&full, self.url, self.file, self.rate_limit,self.status).fuse() => {
-                Self::handle_ranged_result(self.id, full, res)
+        let assigned = self.assign.expect("Assign is Some by spawn() guarantee");
+        let range_header =
+            assigned.to_http_range_header().expect("Range header valid for non-empty ranges").to_string();
+        let resp = HTTP_CLIENT
+            .get(self.url)
+            .map_err(|e| Self::make_failed(self.id, e.into(), Some(assigned.clone().into())))?
+            .header("Range", range_header)
+            .map_err(|e| Self::make_failed(self.id, e.into(), Some(assigned.clone().into())))?
+            .send()
+            .await
+            .map_err(|e| Self::make_failed(self.id, e.into(), Some(assigned.clone().into())))?;
+        let boundary = resp
+            .headers()
+            .parse_boundary()
+            .map_err(|e| Self::make_failed(self.id, e.into(), Some(assigned.clone().into())))?;
+        let byte_stream = resp.bytes_stream();
+        let mut multipart = MultipartStream::new(byte_stream, &boundary);
+        let mut file = RandBufFile::new(self.file);
+        while let Some(part_res) = multipart.next().await {
+            if self.child_cancel.is_cancelled() {
+                cleanup_then_fail!(file, &self.status, self.id, InitiateCancel, Some(assigned.into()));
             }
-            _ = self.child_cancel.cancelled().fuse() => {
-                cancel_err()
+            let part = match part_res {
+                Ok(p) => p,
+                Err(e) => {
+                    cleanup_then_fail!(file, &self.status, self.id, e.into(), Some(assigned.into()))
+                }
+            };
+            let (part_assigned, _) = match part.headers().parse_single_content_range() {
+                Ok(r) => r,
+                Err(e) => cleanup_then_fail!(file, &self.status, self.id, e.into(), Some(assigned.into())),
+            };
+            if !assigned.contains(&part_assigned) {
+                warn!(
+                    part_range = ?part_assigned,
+                    assigned_range = ?assigned,
+                    "Skipping multipart part outside assigned range"
+                );
+                continue;
             }
+            let mut body_stream = part.body();
+            let mut cur = part_assigned.start();
+            while let Ok(Some(payload)) = body_stream.try_next().await {
+                if self.child_cancel.is_cancelled() {
+                    cleanup_then_fail!(file, &self.status, self.id, InitiateCancel, Some(assigned.clone().into()));
+                }
+                if payload.is_empty() {
+                    warn!(
+                        part_range = ?part_assigned,
+                        offset = cur,
+                        "Received empty multipart payload, skipping"
+                    );
+                    continue;
+                }
+                // Safety: payload.len() > 0 verified above, recved validated against part_assigned below
+                let recved = unsafe { Range::new_unchecked(cur, cur + payload.len() - 1) };
+                if !part_assigned.contains(&recved) {
+                    warn!(
+                        slice_range = ?recved,
+                        part_range = ?part_assigned,
+                        "Skipping multipart payload slice outside part boundary"
+                    );
+                    continue;
+                }
+                let tokens = match payload.tokens() {
+                    Ok(t) => t,
+                    Err(e) => cleanup_then_fail!(file, &self.status, self.id, e, Some(assigned.clone().into())),
+                };
+                if let Err(e) = self.rate_limit.acquire(tokens).await {
+                    cleanup_then_fail!(file, &self.status, self.id, e.into(), Some(assigned.clone().into()));
+                }
+                let payload_len = payload.len();
+                let BufResult(res, _) = file.write_all_at(payload, cur as u64).await;
+                if let Err(e) = res {
+                    cleanup_then_fail!(file, &self.status, self.id, e.into(), Some(assigned.clone().into()));
+                }
+                cur += payload_len;
+                Self::update_progress(&self.status, file.buffered_range(), file.flushed_range());
+            }
+        }
+        if let Err(e) = file.shutdown().await {
+            cleanup_then_fail!(file, &self.status, self.id, e.into(), Some(assigned.clone().into()));
+        }
+        let flushed = file.into_flushed_range();
+        Self::update_progress(&self.status, &flushed, &flushed);
+        if flushed != assigned {
+            Err(Self::make_failed(self.id, ParitalDownloaded(flushed), Some(assigned.clone().into())))
+        } else {
+            Ok(WorkSuccess { id: self.id, flushed })
         }
     }
 }
+
+// TODO: Add unit tests

@@ -6,7 +6,7 @@ use std::{
 
 static GLOBAL_TASK_ID: AtomicU64 = AtomicU64::new(0);
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, Serialize, Deserialize, Debug)]
 pub struct TaskId(u64);
 
 impl TaskId {
@@ -17,10 +17,6 @@ impl TaskId {
 impl Default for TaskId {
     #[inline]
     fn default() -> Self { Self::new() }
-}
-
-impl Debug for TaskId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}", self.0) }
 }
 
 impl Display for TaskId {

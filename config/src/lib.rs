@@ -58,16 +58,20 @@ macro_rules! define_config {
 define_config! {
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     pub struct Config {
-        /// 文件缓冲区最大值
+        /// File buffer maximum size
         file_buffer_max: NonZeroUsize,
-        /// 文件缓冲区基础值
+        /// File buffer base size
         file_buffer_base: NonZeroUsize,
-        /// worker 最大重试次数
+        /// Worker max retry count
         worker_max_retries: NonZeroU8,
-        /// 最大并发数
+        /// Max concurrency
         worker_max_concurrency: NonZeroU8,
-        /// 下载块的大小
+        /// Download block size
         http_block_size: NonZeroUsize,
+        /// Worker timeout (minutes)
+        worker_timeout_mins: NonZeroU8,
+        /// Persist broadcast interval (seconds)
+        persist_broadcast_interval_secs: NonZeroU8,
     }
 }
 
@@ -79,6 +83,8 @@ impl Default for Config {
             worker_max_retries: NonZeroU8::new(32).unwrap(),
             worker_max_concurrency: NonZeroU8::new(8).unwrap(),
             http_block_size: NonZeroUsize::new(0x100_0000).unwrap(), // 16 MiB
+            worker_timeout_mins: NonZeroU8::new(3).unwrap(),         // 3 minutes
+            persist_broadcast_interval_secs: NonZeroU8::new(5).unwrap(), // 5 seconds
         }
     }
 }
@@ -169,7 +175,6 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
-    use toml;
     /// 创建一个无效的配置文件，其中 base >= max
     fn create_invalid_config() -> Config {
         Config {
@@ -178,6 +183,8 @@ mod tests {
             worker_max_retries: std::num::NonZeroU8::new(32).unwrap(),
             worker_max_concurrency: std::num::NonZeroU8::new(8).unwrap(),
             http_block_size: std::num::NonZeroUsize::new(16 * 1024 * 1024).unwrap(),
+            worker_timeout_mins: std::num::NonZeroU8::new(3).unwrap(),
+            persist_broadcast_interval_secs: std::num::NonZeroU8::new(5).unwrap(),
         }
     }
 
@@ -189,6 +196,8 @@ mod tests {
             worker_max_retries: NonZeroU8::new(64).unwrap(),
             worker_max_concurrency: NonZeroU8::new(16).unwrap(),
             http_block_size: NonZeroUsize::new(32 * 1024 * 1024).unwrap(), // 32MB
+            worker_timeout_mins: NonZeroU8::new(5).unwrap(),
+            persist_broadcast_interval_secs: NonZeroU8::new(10).unwrap(),
         }
     }
 
@@ -424,10 +433,10 @@ http_block_size = 16777216
         assert_eq!(loaded_config, config);
 
         // 清理：删除测试产生的配置文件和目录
-        if let Ok(path) = confy::get_configuration_file_path(TEST_APP_NAME, None) {
-            if let Some(parent) = path.parent() {
-                let _ = fs::remove_dir_all(parent);
-            }
+        if let Ok(path) = confy::get_configuration_file_path(TEST_APP_NAME, None)
+            && let Some(parent) = path.parent()
+        {
+            let _ = fs::remove_dir_all(parent);
         }
     }
 
@@ -549,6 +558,8 @@ http_block_size = 16777216
             worker_max_retries: max_u8,
             worker_max_concurrency: max_u8,
             http_block_size: large_usize,
+            worker_timeout_mins: max_u8,
+            persist_broadcast_interval_secs: NonZeroU8::new(1).unwrap(),
         };
 
         // 验证 getter 方法能正确处理这些值

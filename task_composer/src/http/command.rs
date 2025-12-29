@@ -19,24 +19,25 @@ pub enum TaskCommand {
 
 impl Display for TaskCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use TaskCommand::*;
         match self {
-            TaskCommand::ChangeConcurrency { id, concurrency } => {
+            ChangeConcurrency { id, concurrency } => {
                 write!(f, "ChangeConcurrency[{}] -> {}", id, concurrency)
             }
-            TaskCommand::ChangeRateLimited { id, limit } => {
+            ChangeRateLimited { id, limit } => {
                 if let Some(limit) = limit {
                     write!(f, "ChangeRateLimited[{}] -> {} bytes/s", id, limit)
                 } else {
                     write!(f, "ChangeRateLimited[{}] -> unlimited", id)
                 }
             }
-            TaskCommand::Pause(id) => write!(f, "Pause[{}]", id),
-            TaskCommand::Resume(id) => write!(f, "Resume[{}]", id),
-            TaskCommand::Cancel(id) => write!(f, "Cancel[{}]", id),
-            TaskCommand::Create { meta, .. } => {
+            Pause(id) => write!(f, "Pause[{}]", id),
+            Resume(id) => write!(f, "Resume[{}]", id),
+            Cancel(id) => write!(f, "Cancel[{}]", id),
+            Create { meta, .. } => {
                 write!(f, "Create['{}']", meta.name())
             }
-            TaskCommand::Remove(id) => write!(f, "Remove[{}]", id),
+            Remove(id) => write!(f, "Remove[{}]", id),
         }
     }
 }

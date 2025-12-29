@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 async-broadcast = { workspace = true }
-async-lock = { workspace = true }
 compio = { workspace = true }
 falcon_identity = { path = "../identity" }
 falcon_task_composer = { path = "../task_composer" }

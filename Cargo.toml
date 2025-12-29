@@ -12,28 +12,30 @@ members = [
 
 [workspace.dependencies]
 async-broadcast = "0.7.2"
-async-lock = "3.4.1"
-camino = { version = "1.2.1", features = ["serde1"] }
-compio = { version = "0.16.1", features = [
+camino = { version = "1.2.2", features = ["serde1"] }
+coarsetime = "0.1.36"
+compio = { version = "0.17.0", features = [
   "dispatcher",
   "macros",
   "nightly",
   "process",
   "time",
 ] }
-criterion = "0.7.0"
-flume = { version = "0.11.1", default-features = false, features = ["async"] }
+criterion = "0.8.1"
+flume = { version = "0.12.0", default-features = false, features = ["async"] }
 futures-util = "0.3.31"
 mime = "0.3.17"
+redb = "3.1.0"
 rstest = "0.26.1"
 see = { git = "https://github.com/compio-rs/see.git", features = ["stream"] }
 serde = { version = "1.0.228", features = ["serde_derive"] }
-sparse_ranges = "0.1.10"
-tempfile = { version = "3.23.0", features = ["nightly"] }
+sparse_ranges = { version = "0.1.12", features = ["http", "serde"] }
+tempfile = { version = "3.24.0", features = ["nightly"] }
 thiserror = "2.0.17"
-tracing = "0.1"
+tracing = "0.1.44"
 tracing-appender = "0.2.4"
 tracing-panic = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
 typed-builder = "0.23.2"
+ubyte = { version = "0.10", features = ["serde"] }
 url = { version = "2.5.7", features = ["serde"] }

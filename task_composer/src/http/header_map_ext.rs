@@ -9,67 +9,73 @@ use percent_encoding::percent_decode_str;
 use regex::Regex;
 use sparse_ranges::Range;
 use thiserror::Error;
-use tracing::instrument;
 
+/// Errors from parsing HTTP header values.
 #[derive(Debug, Error)]
 pub enum HeaderMapExtError {
-    #[error("{0} does not exist")]
+    #[error("Required header '{0}' is missing")]
     FieldNotExist(HeaderName),
-    #[error("Invalid format for header {0}: {1}")]
+    #[error("Invalid format for header '{0}': {1}")]
     FieldFormat(HeaderName, String),
-    #[error(transparent)]
+    #[error("Failed to convert header value to string: {0}")]
     HeaderToStr(#[from] http::header::ToStrError),
-    #[error(transparent)]
+    #[error("Failed to parse MIME type: {0}")]
     InvalidMime(#[from] FromStrError),
-    #[error("Not multipart content type: {0}")]
+    #[error("Expected multipart content type, got: {0}")]
     NotMultipart(Mime),
-    #[error("Not found boundary in mime: {0}")]
+    #[error("Multipart content type '{0}' is missing required 'boundary' parameter")]
     NotFoundBoundary(Mime),
 }
 
 static INVALID_REGEX_PANIC_MSG: &str = "Invalid regex";
+
 thread_local! {
-    // 加上 (?i) 忽略大小写以防万一，虽然标准通常是 bytes
+    // (?i) for case-insensitive matching
     static SINGLE_CONTENT_RANGE_PATTERN: Regex =
         Regex::new(r"(?i-u:^bytes\s+(\d+)-(\d+)/(\d+)$)").expect(INVALID_REGEX_PANIC_MSG);
 
     static CONTENT_DISPOSITION_PATTERN: Regex =
-    Regex::new(r#"(?xi) # 使用 x (忽略空白) 和 i (忽略大小写) 模式
-        # 优先匹配 filename* (RFC 5987 / 8187)
+    Regex::new(r#"(?xi) # x (ignore whitespace) and i (case-insensitive) mode
+        # Priority 1: filename* (RFC 5987 / 8187)
         filename\*=
             ([\w-]+) # Group 1: Charset (e.g., UTF-8)
             ''
             ([^;]+)          # Group 2: Encoded value (e.g., %E6%96%87...)
         | # OR
-        # 其次匹配 filename="..." (RFC 2616)
+        # Priority 2: filename="..." (RFC 2616)
         filename="
             ([^"]+)          # Group 3: Quoted value
         "
         | # OR
-        # 最后匹配 filename=... (兼容性写法)
+        # Priority 3: filename=... (fallback compatibility)
         filename=
             ([^;]+)          # Group 4: Unquoted value
     "#).expect(INVALID_REGEX_PANIC_MSG);
 }
 
+/// Extension trait for parsing HTTP headers.
 pub trait HeaderMapExt {
+    /// Parses multipart boundary from Content-Type header.
     fn parse_boundary(&self) -> Result<Box<[u8]>, HeaderMapExtError>;
+    /// Parses single Content-Range header value.
     fn parse_single_content_range(&self) -> Result<(Range, usize), HeaderMapExtError>;
+    /// Parses filename from Content-Disposition header.
     fn parse_filename(&self) -> Result<String, HeaderMapExtError>;
+    /// Checks if server supports range requests.
     fn parse_accept_ranges(&self) -> bool;
+    /// Parses Content-Length header value.
     fn parse_content_length(&self) -> Option<usize>;
 }
 
 impl HeaderMapExt for HeaderMap {
-    #[instrument(skip_all)]
     fn parse_boundary(&self) -> Result<Box<[u8]>, HeaderMapExtError> {
         let content_type = self.get(CONTENT_TYPE).ok_or(FieldNotExist(CONTENT_TYPE))?.to_str()?;
         let mime: Mime = content_type.parse()?;
         if mime.type_() != mime::MULTIPART {
             return Err(NotMultipart(mime));
         }
-        let bnd = mime.get_param(mime::BOUNDARY).ok_or_else(|| NotFoundBoundary(mime.clone()))?.as_str();
-        Ok(bnd.as_bytes().into())
+        let boundary = mime.get_param(mime::BOUNDARY).ok_or_else(|| NotFoundBoundary(mime.clone()))?.as_str();
+        Ok(boundary.as_bytes().into())
     }
 
     fn parse_single_content_range(&self) -> Result<(Range, usize), HeaderMapExtError> {
@@ -91,27 +97,26 @@ impl HeaderMapExt for HeaderMap {
         Ok((rng, total))
     }
 
-    #[instrument(skip_all)]
     fn parse_filename(&self) -> Result<String, HeaderMapExtError> {
         let content_disposition =
             self.get(CONTENT_DISPOSITION).ok_or_else(|| FieldNotExist(CONTENT_DISPOSITION))?.to_str()?;
         CONTENT_DISPOSITION_PATTERN
             .with(|regex| regex.captures(content_disposition))
             .and_then(|caps| {
-                // 匹配 Group 1(charset) 和 2 (filename*)
+                // Match Group 1 (charset) and 2 (filename*)
                 if let (Some(charset), Some(encoded_value)) = (caps.get(1), caps.get(2)) {
                     if charset.as_str() != "UTF-8" {
                         return Some(timebased_filename(None));
                     }
-                    // 这个值是必须 percent-decoded 的
+                    // Value must be percent-decoded
                     return Some(percent_decode_str(encoded_value.as_str()).decode_utf8_lossy().to_string());
                 }
-                // 匹配 Group 3 (Quoted filename)
+                // Match Group 3 (Quoted filename)
                 if let Some(quoted_value) = caps.get(3) {
-                    // 普通 filename 不需要 percent-decode
+                    // Regular filename does not need percent-decode
                     return Some(quoted_value.as_str().to_string());
                 }
-                // 匹配 Group 4 (Unquoted)
+                // Match Group 4 (Unquoted)
                 if let Some(unquoted_value) = caps.get(4) {
                     return Some(unquoted_value.as_str().trim().to_string());
                 }
@@ -180,7 +185,7 @@ mod tests {
     #[case("bytes 0-1023/2048", 0, 1023, 2048)] // Typical first range
     #[case("bytes 1024-2047/2048", 1024, 2047, 2048)] // Typical middle range
     #[case("bytes 2048-2048/2049", 2048, 2048, 2049)] // Single byte range (e.g., last byte)
-    // 忽略大小写测试
+    // Case-insensitive test
     #[case("BYTES 0-1023/2048", 0, 1023, 2048)]
     fn parse_single_content_range_success(
         #[case] value: &str, #[case] expected_start: usize, #[case] expected_end: usize, #[case] expected_total: usize,
@@ -231,19 +236,15 @@ mod tests {
         let result = headers.parse_filename();
         assert!(result.is_ok());
         let filename = result.unwrap();
-        // 检查返回值是否符合动态时间戳的模式（如果 timebased_filename 返回动态时间）
-        // 示例：检查字符串是否以 .bin 结尾，并且长度合理（表示不是文件名本身，而是 fallback）
+        // Check fallback to timebased filename pattern
         assert!(filename.ends_with(".bin"));
-        // 并且检查它不是预期的文件名（它应该是一个 fallback 值）
         assert_ne!(filename, "测试文件.txt");
-        // 如果您确定 timebased_filename 的输出格式，可以更严格地检查：
-        // assert!(filename.starts_with("20")); // 检查是否以年份开始
     }
 
-    // RFC 2616: filename="..." (其次匹配)
+    // RFC 2616: filename="..." (Priority 2)
     #[test]
     fn parse_filename_quoted_success() {
-        // 普通 filename 不需要 percent-decode，取 Group 3
+        // Regular filename does not need percent-decode, Group 3
         let value = r#"attachment; filename="document.pdf""#;
         let headers = create_headers(CONTENT_DISPOSITION, value);
         let result = headers.parse_filename();
@@ -251,7 +252,7 @@ mod tests {
         assert_eq!(result.unwrap(), "document.pdf");
     }
 
-    // Unquoted: filename=... (最后匹配，兼容性)
+    // Unquoted: filename=... (Priority 3, fallback compatibility)
     #[test]
     fn parse_filename_unquoted_success() {
         // Group 4
@@ -264,7 +265,7 @@ mod tests {
 
     #[test]
     fn parse_filename_format_error() {
-        // 无法匹配任何一种格式
+        // Cannot match any format
         let value = r#"inline; name=field"#;
         let headers = create_headers(CONTENT_DISPOSITION, value);
         let result = headers.parse_filename();

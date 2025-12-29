@@ -2,6 +2,7 @@ mod command;
 mod dispatcher;
 mod header_map_ext;
 mod meta;
+pub mod persist;
 mod qos;
 mod status;
 mod worker;

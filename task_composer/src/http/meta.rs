@@ -1,5 +1,5 @@
 use crate::{
-    http::{header_map_ext::HeaderMapExt, worker::GLOBAL_HTTP_CLIENT},
+    http::{header_map_ext::HeaderMapExt, worker::HTTP_CLIENT},
     safe_filename::timebased_filename,
     utils::safe_filename::SafeFileName,
 };
@@ -8,31 +8,61 @@ use cyper::Response;
 use http::header::CONTENT_TYPE;
 use mime::{APPLICATION_OCTET_STREAM, Mime};
 use sanitize_filename_reader_friendly::sanitize;
+use serde::{Deserialize, Serialize};
 use sparse_ranges::RangeSet;
 use std::{fmt, ops::Not};
+use ubyte::ByteUnit;
 use url::Url;
 
-#[derive(Debug, Clone)]
+// Custom serialization/deserialization helpers for Mime type
+mod mime_serde {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S>(mime: &Mime, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(mime.as_ref())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Mime, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// HTTP task metadata extracted from response headers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HttpTaskMeta {
     url: Url,
     name: SafeFileName,
+    /// File size in bytes
     size: Option<usize>,
+    #[serde(with = "mime_serde")]
     mime: Mime,
+    /// Server supports range requests
     ranges_support: bool,
 }
 
 impl HttpTaskMeta {
-    pub fn is_support_ranges(&self) -> bool { self.ranges_support }
+    pub const fn is_support_ranges(&self) -> bool { self.ranges_support }
 
-    pub fn url(&self) -> &Url { &self.url }
+    pub const fn url(&self) -> &Url { &self.url }
 
     pub fn name(&self) -> &str { self.name.as_str() }
 
-    pub fn mime(&self) -> &Mime { &self.mime }
+    pub const fn mime(&self) -> &Mime { &self.mime }
 
     pub fn as_path_name(&self) -> &Utf8Path { &self.name }
 
-    /// 返回 None 代表 header 未告知文件， 返回空集合代表长度为 0
+    /// Returns full content range.
+    ///
+    /// Returns `None` if header did not specify size.
+    /// Returns empty set if size is 0.
     pub fn full_content_range(&self) -> Option<RangeSet> {
         let size = self.size?;
         let mut set = RangeSet::new();
@@ -72,18 +102,8 @@ impl From<Response> for HttpTaskMeta {
 impl fmt::Display for HttpTaskMeta {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Meta['{}']", self.name)?;
-        // todo 换算
         if let Some(size) = self.size {
-            let size_str = if size >= 1_073_741_824 {
-                format!("{:.2} GB", size as f64 / 1_073_741_824.0)
-            } else if size >= 1_048_576 {
-                format!("{:.2} MB", size as f64 / 1_048_576.0)
-            } else if size >= 1024 {
-                format!("{:.2} KB", size as f64 / 1024.0)
-            } else {
-                format!("{} B", size)
-            };
-            write!(f, " size: {}", size_str)?;
+            write!(f, " size: {}", ByteUnit::Byte(size as u64))?;
         } else {
             write!(f, " size: unknown")?;
         }
@@ -97,13 +117,16 @@ impl fmt::Display for HttpTaskMeta {
     }
 }
 
+/// Fetches HTTP metadata from URL using HEAD request, falling back to GET.
+///
+/// TODO: Add request parameters.
+/// TODO: Try range request for 1 byte before full GET fallback.
 pub async fn fetch_meta(url: &Url) -> cyper::Result<HttpTaskMeta> {
-    if let Ok(resp) = GLOBAL_HTTP_CLIENT.head(url.clone())?.send().await {
+    if let Ok(resp) = HTTP_CLIENT.head(url.clone())?.send().await {
         return Ok(resp.into());
     }
-    // todo 加点请求参数
-    // todo 先 range 请求一字节，如果连range 和 head 都不支持可以再 fallback
-    GLOBAL_HTTP_CLIENT.get(url.clone())?.send().await.map(|resp| resp.into())
+    // Fallback to GET if HEAD fails
+    HTTP_CLIENT.get(url.clone())?.send().await.map(|resp| resp.into())
 }
 
 #[cfg(test)]
@@ -138,16 +161,16 @@ mod tests {
         assert!(format!("{}", meta).contains("unknown"));
 
         // Test without ranges support
-        meta.size = Some(1_048_576); // 1 MB
+        meta.size = Some(1_048_576); // 1 MiB
         meta.ranges_support = false;
         println!("Meta without ranges support: {}", meta);
-        assert!(format!("{}", meta).contains("MB"));
+        assert!(format!("{}", meta).contains("MiB"));
         assert!(format!("{}", meta).contains("✗"));
 
-        // Test small file (KB)
-        meta.size = Some(5120); // 5 KB
+        // Test small file (KiB)
+        meta.size = Some(5120); // 5 KiB
         println!("Small file: {}", meta);
-        assert!(format!("{}", meta).contains("KB"));
+        assert!(format!("{}", meta).contains("KiB"));
 
         // Test very small file (Bytes)
         meta.size = Some(512); // 512 B
