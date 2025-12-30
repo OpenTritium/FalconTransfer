@@ -215,7 +215,7 @@ mod tests {
             .build();
 
         status.state.set_failed();
-        status.set_err(WorkerError::ParitalDownloaded(RangeSet::new()));
+        status.set_err(WorkerError::PartialDownloaded(RangeSet::new()));
 
         let output = format!("{}", status);
 

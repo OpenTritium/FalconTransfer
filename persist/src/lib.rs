@@ -1,6 +1,6 @@
 // 仅在非 test 构建时启用这些 Clippy 警告
 #![cfg_attr(not(test), warn(clippy::nursery, clippy::unwrap_used, clippy::todo, clippy::dbg_macro,))]
-
+#![allow(clippy::future_not_send)]
 pub mod registry;
 pub mod store;
 // mod stream_map;
@@ -38,28 +38,16 @@ pub enum Error {
     Serde(#[from] bitcode::Error),
     #[error("Type cast failed for {0}")]
     AnyCast(&'static str),
+    #[error("Filesystem operation failed: {0}")]
+    FileSystem(#[from] std::io::Error),
 }
 
 type PersistHandler = Box<dyn FnMut(&PersistStore) + Send + Sync>;
 
 /// State persistence poller that periodically persists state changes to storage.
 ///
-/// The poller maintains a collection of handlers that receive state updates from broadcast channels.
-/// Each handler polls its channel for the latest state and persists it to the database.
-/// The poller runs on a fixed interval and compacts the database on drop.
-///
-/// # Type Parameters
-///
-/// * `T` - The state type to persist, must implement `PersistableState`, `Clone`, and `Send`
-///
-/// # Examples
-///
-/// ```ignore
-/// let (tx, rx) = broadcast::channel(10);
-/// let poller = StatePersistPoller::new(store, Duration::from_secs(5));
-/// poller.register(rx);
-/// let handle = poller.watch(); // Returns JoinHandle that can be aborted if needed
-/// ```
+/// Maintains handlers that receive state updates from broadcast channels and persists them
+/// to the database on a fixed interval. Compacts the database on drop.
 pub struct StatePersistPoller {
     store: PersistStore,
     handlers: Vec<PersistHandler>,
@@ -68,40 +56,20 @@ pub struct StatePersistPoller {
 
 impl StatePersistPoller {
     /// Creates a new state persistence poller.
-    ///
-    /// # Arguments
-    ///
-    /// * `store` - The persistent store to write state to
-    /// * `interval` - The polling interval between persistence checks
     #[must_use]
     pub fn new(store: PersistStore, interval: Duration) -> Self { Self { store, handlers: Vec::new(), interval } }
 
     /// Registers a state receiver for automatic persistence.
     ///
-    /// The closure captures the receiver, preserving type information for `T`.
-    /// On each poll interval, the latest value from the channel will be persisted.
-    ///
-    /// # Arguments
-    ///
-    /// * `rx` - A broadcast receiver for the state type `T`
-    ///
-    /// # Type Parameters
-    ///
-    /// * `T` - State type that implements `PersistableState`, `Clone`, and `Send`
-    ///
-    /// # Behavior
-    ///
-    /// - Only the most recent value is persisted (older values are dropped)
-    /// - Empty channels result in no-op for that poll cycle
-    /// - Closed channels are handled gracefully
-    /// - Overflowed messages are skipped in favor of newer data
+    /// Captures the receiver and persists the latest value from the channel on each poll interval.
+    /// Only the most recent value is persisted; older values and overflowed messages are skipped.
     #[instrument(skip(self, rx), fields(data_type = %type_name::<T>()))]
     pub fn register<T>(&mut self, mut rx: broadcast::Receiver<T>)
     where
         T: PersistableState + Clone + Send + 'static,
         <T as IntoIterator>::Item: TupleEntry,
     {
-        // 创建一个闭包，它知道如何从这个特定的 rx 收数据并存入 db
+        // Create closure that knows how to receive data from this specific rx and persist to db
         let handler = Box::new(move |store: &PersistStore| {
             let latest_item = loop {
                 match rx.try_recv() {
@@ -111,35 +79,33 @@ impl StatePersistPoller {
                 }
             };
             let Some(item) = latest_item else { return };
-            store.refresh(item).map_err(|e| {
-                warn!(error = %e, data_type = %type_name::<T>(), "State persistence failed, will retry on next poll");
-            }).ok();
+            if let Err(e) = store.refresh(item) {
+                warn!(error = %e, data_type = %type_name::<T>(), "State persistence failed");
+            }
         });
         self.handlers.push(handler);
     }
 
     /// Starts the polling loop in the background.
     ///
-    /// This spawns an async task that periodically calls all registered handlers
-    /// to persist the latest state from their respective broadcast channels.
+    /// Spawns an async task that periodically calls all registered handlers to persist state.
+    /// The task runs indefinitely until aborted. Database compaction is triggered on drop.
     ///
     /// # Returns
     ///
-    /// A `JoinHandle` that can be used to abort the task if needed.
-    ///
-    /// # Behavior
-    ///
-    /// - The task runs indefinitely until aborted or dropped
-    /// - Database compaction is triggered when the poller is dropped
-    /// - Each handler executes blocking I/O, but the workload is typically small
+    /// Returns a `JoinHandle` that can be used to abort the task.
     #[instrument(name = "persist.poller", skip(self), fields(interval_ms = self.interval.as_millis(), handler_count = self.handlers.len()))]
     pub fn watch(mut self) -> JoinHandle<()> {
         spawn(async move {
-            info!("State persistence poller started");
+            info!(
+                handler_count = self.handlers.len(),
+                interval_ms = self.interval.as_millis(),
+                "State persistence poller started"
+            );
             let mut timer = interval(self.interval);
             loop {
                 timer.tick().await;
-                // 虽然数据库是阻塞 IO, 但是这里工作量不大，没必要开新线程
+                // Database is blocking I/O, but workload is small enough to run directly
                 for handler in &mut self.handlers {
                     handler(&self.store);
                 }
@@ -149,11 +115,11 @@ impl StatePersistPoller {
 }
 
 impl Drop for StatePersistPoller {
-    #[instrument(skip(self), fields(table_count = self.handlers.len()))]
+    #[instrument(skip(self), fields(handler_count = self.handlers.len()))]
     fn drop(&mut self) {
         match self.store.compact() {
-            Ok(()) => debug!("Database compacted successfully"),
-            Err(e) => warn!(error = %e, "Database compaction failed during shutdown"),
+            Ok(()) => debug!("Database compaction completed"),
+            Err(e) => warn!(error = %e, "Failed to compact database on shutdown"),
         }
     }
 }

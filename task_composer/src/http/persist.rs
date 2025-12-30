@@ -3,7 +3,7 @@ use crate::{
 };
 use camino::Utf8PathBuf;
 use compio::fs::OpenOptions;
-use falcon_identity::task::TaskId;
+use falcon_identity::task::{TaskId, reset_task_id_generator};
 use falcon_persist::{impl_persist, store::PersistStore};
 use flume as mpmc;
 use see::sync as watch;
@@ -91,6 +91,8 @@ impl TaskDispatcher {
     }
 
     /// Constructs dispatcher from persisted state and command channel.
+    ///
+    /// Restores all tasks and resets ID generator to avoid conflicts.
     async fn from_persisted(
         persisted_tasks: PersistTaskStates, persisted_pendings: PersistTaskPendings, cmd: mpmc::Receiver<TaskCommand>,
     ) -> Result<Self, dispatcher::Error> {
@@ -105,7 +107,14 @@ impl TaskDispatcher {
                 }
             }
         }
-        let dispatcher = Self::builder().cmd(cmd).pendings(persisted_pendings.0).tasks(tasks).build();
+        // Reset ID generator to avoid conflicts with existing tasks.
+        let max_id = tasks.keys().copied().max();
+        if let Some(max_id) = max_id {
+            reset_task_id_generator(max_id.inner() + 1);
+        }
+        let mut dispatcher = Self::builder().cmd(cmd).pendings(persisted_pendings.0).tasks(tasks).build();
+        // Auto-resume running tasks that are not in pendings
+        dispatcher.restore_running_tasks();
         Ok(dispatcher)
     }
 }

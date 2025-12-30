@@ -48,7 +48,7 @@
     ```
 
 ### 2.3 Async Closures (异步闭包)
-严禁手动构建 `Future` 或使用复杂的 `move` 块，直接使用 2024 语法。
+严禁手动构建 `Future`，直接使用 2024 语法。
 *   **示例：** `let handler = async |req| client.send(req).await;`
 
 ### 2.4 Trait 中的异步
@@ -186,7 +186,34 @@
 *   **内联注释**：在可能 panic 或 unsafe 的代码处添加简短注释说明原因
 *   **禁止文档示例**：所有函数均不提供示例代码
 
-### 5.3 日志分层规则
+### 5.3 副作用文档规范
+*   **声明隐式副作用**：如果函数有**看起来不属于其名字所表达的职责**的副作用，必须在文档中显式声明
+*   **适用场景**：
+  - 函数名为 `read_from` 但可能触发**扩容**（memory allocation）
+  - 函数名为 `flush` 但可能触发**内存回收**（shrink）
+  - 函数名为 `get_xxx` 但可能**修改缓存状态**
+  - 工具函数内部调用了**I/O** 或**全局状态修改**
+*   **不适用场景**（无需声明）：
+  - `mut` 方法修改自己的字段（预期行为）
+  - `write` 方法执行写入（名字已表明）
+  - `close` 方法释放资源（名字已表明）
+*   **示例**：
+  ```rust
+  /// Writes data to the buffer.
+  ///
+  /// # Side Effects
+  /// - May allocate additional memory if buffer capacity is exceeded
+  /// - May compact existing data to make space
+  fn read_from(&mut self, src: &[u8]) -> usize;
+
+  /// Flushes buffered data to disk.
+  ///
+  /// # Side Effects
+  /// - May shrink buffer capacity to `file_buffer_base` after flushing
+  async fn flush(&mut self) -> io::Result<()>;
+  ```
+
+### 5.4 日志分层规则
 *   **核心层/库代码**：禁止引入 `tracing`/`log` 框架，仅返回错误
 *   **业务层代码**：引入 `tracing` 记录日志，捕获底层错误并添加上下文
 *   **原因**：保持库的可复用性，让调用方决定日志策略

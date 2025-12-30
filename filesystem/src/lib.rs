@@ -4,5 +4,7 @@
 mod buffer;
 mod buffered_file;
 mod mime;
+mod safe_filename;
 pub use buffered_file::{RandBufFile, SeqBufFile};
-pub use mime::assign_path;
+pub use mime::{assign_path, assign_path_unique};
+pub use safe_filename::*;

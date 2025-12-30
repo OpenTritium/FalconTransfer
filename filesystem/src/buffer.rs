@@ -1,5 +1,7 @@
-/// 来自于 Compio
-/// 它并不负责限制缓冲区上限，需要调用者自己确定什么时候 flush，默认情况是缓冲区会有一个上界然后回收至默认大小
+/// Zero-copy buffer from Compio with automatic expansion and recycling.
+///
+/// Does not enforce buffer size limits. Callers must decide when to flush.
+/// Default behavior: buffer has an upper bound and recycles to base size.
 use compio::{
     BufResult,
     buf::{IntoInner, IoBuf, IoBufMut, SetBufInit, Slice},
@@ -27,7 +29,7 @@ impl Inner {
     #[inline]
     const fn all_done(&self) -> bool { self.buf.len() == self.pos }
 
-    /// 缓冲区是否有数据（不论是否被处理）
+    /// Returns true if the buffer contains any initialized data.
     #[inline]
     const fn is_empty(&self) -> bool { self.buf.is_empty() }
 
@@ -97,8 +99,11 @@ impl Buffer {
     #[inline]
     pub fn remaining_len(&self) -> usize { self.remaining().len() }
 
-    /// 截断 remaining 到指定长度
-    /// maybe panic
+    /// Truncates the remaining data to the specified range.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the range is out of bounds.
     #[inline]
     pub fn retain_remaining<R>(&mut self, rng: R)
     where
@@ -112,11 +117,15 @@ impl Buffer {
         }
         if start > 0 {
             self.buf_mut().drain(..start + pos);
-            self.set_position(0); // 截断头部需要重新设置游标
+            self.set_position(0);
         }
     }
 
-    /// 劈掉 at.. 范围的字节
+    /// Splits off the remaining data at the specified position.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `at` is greater than `remaining_len()`.
     #[inline]
     pub fn split_remaining_off(&mut self, at: usize) -> Self {
         let pos = self.get_position();
@@ -141,9 +150,12 @@ impl Buffer {
     #[inline]
     pub fn reset(&mut self) { self.inner_mut().reset(); }
 
-    /// 如果你想回收已经写入的空间，就使用此函数，如果你想更彻底一点回收未使用的内存，继续调用 shrink 即可
-    /// compact 的语义是不改变缓冲区容量的情况下回收已经写入的字节，而 shrink 的语义是改变缓冲区容量
-    /// 如果为缓冲区空就直接返回
+    /// Compacts the buffer by moving unconsumed data to the front.
+    ///
+    /// Reclaims space consumed by `advance()` without changing capacity.
+    /// Call shrink methods afterwards to reduce capacity.
+    ///
+    /// Does nothing if the buffer is empty or position is already at zero.
     #[inline]
     pub fn compact(&mut self) {
         // If the buffer is empty (len is 0), there is nothing to compact
@@ -160,30 +172,17 @@ impl Buffer {
         }
     }
 
-    /// Shrinks the capacity of the underlying buffer as much as possible.
+    /// Shrinks the buffer capacity as much as possible.
     ///
-    /// This directly calls [`Vec::shrink_to_fit()`] on the internal buffer.
-    ///
-    /// # Warning
-    ///
-    /// This method does **not** compact the buffer first. If there is consumed
-    /// space at the beginning of the buffer (i.e., `pos > 0`), that space will
-    /// **not** be freed.
-    ///
-    /// To shrink the capacity based on the amount of *unprocessed* data,
-    /// you should call [`compact()`] **before** calling this method.
-    ///
-    /// [`compact()`]: Self::compact
+    /// Does not compact first. Call `compact()` before this to free consumed space.
     #[inline]
     pub fn shrink_to_fit(&mut self) { self.inner_mut().buf.shrink_to_fit(); }
 
-    /// 尝试将容量缩减至 limit。
+    /// Shrinks buffer capacity to the specified limit if conditions are met.
     ///
-    /// 逻辑如下：
-    /// 1. 如果当前数据长度 (len) > limit：视为高负载状态，为了性能**不做任何操作**（防止将容量缩减至 len
-    ///    后，下次写入又要扩容）。
-    /// 2. 如果当前容量 (cap) <= limit：无需回收，**不做任何操作**（标准库 shrink_to 也会处理这个，但提前判断更清晰）。
-    /// 3. 如果 len <= limit < cap：将容量缩减至 limit，释放多余内存。
+    /// Only shrinks if `len <= limit < capacity`. Preserves capacity if:
+    /// - Current data length exceeds limit (high load state)
+    /// - Current capacity is already at or below limit
     #[inline]
     pub fn shrink_to_limit(&mut self, limit: usize) {
         if self.buf().len() > limit {
@@ -203,11 +202,19 @@ impl Buffer {
     #[inline]
     pub fn reserve(&mut self, additional: usize) { self.inner_mut().buf.reserve(additional); }
 
+    /// Reads data from the source slice into the buffer.
+    ///
+    /// # Side Effects
+    ///
+    /// - May compact the buffer to make space
+    /// - May automatically expand capacity up to `file_buffer_max`
+    /// - May truncate input if it exceeds `file_buffer_max`
+    ///
+    /// Returns the number of bytes actually read.
     #[must_use]
     pub fn read_from(&mut self, src: &[u8]) -> usize {
-        /// 尝试在空余缓冲区容量足够时全部写入
-        /// 如果当前容量足够，则返回 true
-        /// 如果当前容量不足，则返回 false
+        /// Tries to write all data if there's enough uninitialized capacity.
+        /// Returns true if successful, false if capacity is insufficient.
         fn try_write_all(dst: &mut Buffer, src: &[u8]) -> bool {
             if dst.uninitialized_capacity() >= src.len() {
                 dst.buf_mut().extend_from_slice(src);
@@ -246,16 +253,25 @@ impl Buffer {
         res
     }
 
-    /// 如果写入量为0会抛出异常
-    pub async fn flush_with(
-        &mut self, mut func: impl AsyncFnMut(Inner) -> BufResult<usize, Inner>,
-    ) -> io::Result<usize> {
+    /// Flushes the buffer to a writer.
+    ///
+    /// # Side Effects
+    ///
+    /// - Resets the buffer after successful flush
+    /// - Advances the underlying writer's position
+    ///
+    /// # Errors
+    ///
+    /// If the underlying write fails, the buffer may be in a partially written state.
+    /// Data already written cannot be rolled back.
+    pub async fn flush_to(&mut self, dst: &mut impl AsyncWrite) -> io::Result<usize> {
         if self.all_done() {
             return Ok(0);
         }
         let mut total_written = 0;
         loop {
-            let written = self.with_inner(&mut func).await?;
+            let written =
+                self.with_inner(async |inner| dst.write(inner.into_owned_remaining()).await.into_inner()).await?;
             if written == 0 {
                 return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Cannot flush all buffer data"));
             }
@@ -269,18 +285,49 @@ impl Buffer {
         Ok(total_written)
     }
 
-    /// Wrapper to flush the buffer to a writer with error safety.
-    pub async fn flush_to(&mut self, dst: &mut impl AsyncWrite) -> io::Result<usize> {
-        self.flush_with(async |inner| dst.write(inner.into_owned_remaining()).await.into_inner()).await
-    }
-
-    pub async fn flush_at_to(&mut self, pos: u64, dst: &mut impl AsyncWriteAt) -> io::Result<usize> {
-        self.flush_with(async |inner| dst.write_at(inner.into_owned_remaining(), pos).await.into_inner()).await
+    /// Flushes the buffer to a writer at the specified offset.
+    ///
+    /// # Side Effects
+    ///
+    /// - Resets the buffer after successful flush
+    /// - Increments `pos` parameter after each write operation
+    ///
+    /// # Errors
+    ///
+    /// If the underlying write fails, the buffer may be in a partially written state.
+    /// Data already written cannot be rolled back.
+    pub async fn flush_at_to(&mut self, mut pos: u64, dst: &mut impl AsyncWriteAt) -> io::Result<usize> {
+        if self.all_done() {
+            return Ok(0);
+        }
+        let mut total_written = 0;
+        loop {
+            let written = self
+                .with_inner(async |inner| dst.write_at(inner.into_owned_remaining(), pos).await.into_inner())
+                .await?;
+            if written == 0 {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Cannot flush all buffer data"));
+            }
+            total_written += written;
+            pos += written as u64;
+            self.advance(written);
+            if self.all_done() {
+                break;
+            }
+        }
+        self.reset();
+        Ok(total_written)
     }
 
     #[inline]
     pub fn advance(&mut self, amount: usize) {
-        debug_assert!(self.inner().pos.checked_add(amount) <= Some(self.inner().buf_capacity()));
+        debug_assert!(
+            self.inner().pos.checked_add(amount) <= Some(self.inner().buf_capacity()),
+            "advance would overflow: pos={}, amount={}, capacity={}",
+            self.inner().pos,
+            amount,
+            self.inner().buf_capacity()
+        );
         let inner = self.inner_mut();
         inner.pos += amount;
     }
@@ -315,8 +362,9 @@ impl Buffer {
     #[must_use]
     const fn buf_mut(&mut self) -> &mut Vec<u8> { &mut self.inner_mut().buf }
 
-    /// 作为左半部分连接 other buffer
-    /// 会先将 other compact 一下再 append
+    /// Appends another buffer as the left half, then appends its data.
+    ///
+    /// Compacts `other` before appending to optimize space usage.
     #[inline]
     fn left_join(&mut self, mut other: Self) {
         other.compact();
@@ -380,7 +428,9 @@ impl VectoredBuffer {
         self.0.iter_mut().map(|(&offset, buf)| BufferAt { offset, buf })
     }
 
-    /// 调用此函数前请先调用 release_done
+    /// Compacts all buffers by moving unconsumed data to the front.
+    ///
+    /// Call `release_done()` before this to remove empty buffers first.
     #[inline]
     pub fn compact_all(&mut self) {
         for buf in self.0.values_mut() {
@@ -388,7 +438,9 @@ impl VectoredBuffer {
         }
     }
 
-    // 如果你想将已经处理的也给shrink 掉，请调用此函数之前调用 compact_all
+    /// Shrinks all buffer capacities as much as possible.
+    ///
+    /// Call `compact_all()` before this to free consumed space first.
     #[inline]
     pub fn shrink_all_to_fit(&mut self) {
         for buf in self.0.values_mut() {
@@ -396,7 +448,9 @@ impl VectoredBuffer {
         }
     }
 
-    /// 有效的回收内存
+    /// Shrinks all buffer capacities to the specified limit.
+    ///
+    /// Only shrinks buffers where `len <= limit < capacity`.
     #[inline]
     pub fn shrink_all_to_limit(&mut self, min_cap: usize) {
         for buf in self.0.values_mut() {
@@ -404,6 +458,12 @@ impl VectoredBuffer {
         }
     }
 
+    /// Removes all buffers that have been fully consumed.
+    ///
+    /// # Side Effects
+    ///
+    /// - Modifies the internal buffer map structure
+    /// - May affect range calculations if not called before operations
     #[inline]
     pub fn release_done(&mut self) { self.0.retain(|_, buf| !buf.all_done()); }
 
@@ -470,7 +530,17 @@ impl VectoredBuffer {
         }
     }
 
-    /// 智能写入：处理重叠、左合并、右合并
+    /// Reads data from the source slice into the buffer at the specified position.
+    ///
+    /// Handles overlapping regions, left merging, and right merging automatically.
+    ///
+    /// # Side Effects
+    ///
+    /// - May invalidate or split existing buffers that overlap with the write range
+    /// - May merge adjacent buffers automatically
+    /// - May create new buffer entries
+    ///
+    /// Returns the number of bytes actually read.
     pub fn read_from_at(&mut self, src: &[u8], pos: usize) -> usize {
         if src.is_empty() {
             return 0;
@@ -531,7 +601,16 @@ impl VectoredBuffer {
         write_len
     }
 
-    // todo 实际上现在还是串行写入
+    /// Flushes all buffers to the underlying writer.
+    ///
+    /// # Side Effects
+    ///
+    /// - Calls `release_done()` after flushing
+    /// - Writes data at each buffer's respective offset
+    ///
+    /// # Errors
+    ///
+    /// If any write fails, the buffer may be in a partially written state.
     pub async fn flush_to(&mut self, dst: &mut impl AsyncWriteAt) -> io::Result<usize> {
         if self.all_done() {
             return Ok(0);
@@ -557,6 +636,10 @@ mod tests {
     struct MockFile {
         // 使用 BTreeMap 模拟稀疏文件存储，key 是 offset
         data: Arc<Mutex<BTreeMap<u64, u8>>>,
+        // 每次写入的最大字节数，None 表示无限制
+        max_write_per_call: Option<usize>,
+        // 写入计数器，用于测试
+        write_count: Arc<Mutex<usize>>,
     }
 
     impl MockFile {
@@ -580,10 +663,19 @@ mod tests {
             let current_len = self.len();
             let slice = unsafe { std::slice::from_raw_parts(buf.as_buf_ptr(), buf.buf_len()) };
             let mut map = self.data.lock().unwrap();
-            for (i, &b) in slice.iter().enumerate() {
+            let mut count = self.write_count.lock().unwrap();
+            *count += 1;
+
+            // 根据配置决定写入多少字节
+            let to_write = match self.max_write_per_call {
+                Some(max) => slice.len().min(max),
+                None => slice.len(),
+            };
+
+            for (i, &b) in slice.iter().take(to_write).enumerate() {
                 map.insert(current_len + i as u64, b);
             }
-            BufResult(Ok(slice.len()), buf)
+            BufResult(Ok(to_write), buf)
         }
 
         async fn flush(&mut self) -> io::Result<()> { Ok(()) }
@@ -595,10 +687,19 @@ mod tests {
         async fn write_at<T: IoBuf>(&mut self, buf: T, pos: u64) -> BufResult<usize, T> {
             let slice = unsafe { std::slice::from_raw_parts(buf.as_buf_ptr(), buf.buf_len()) };
             let mut map = self.data.lock().unwrap();
-            for (i, &b) in slice.iter().enumerate() {
+            let mut count = self.write_count.lock().unwrap();
+            *count += 1;
+
+            // 根据配置决定写入多少字节
+            let to_write = match self.max_write_per_call {
+                Some(max) => slice.len().min(max),
+                None => slice.len(),
+            };
+
+            for (i, &b) in slice.iter().take(to_write).enumerate() {
                 map.insert(pos + i as u64, b);
             }
-            BufResult(Ok(slice.len()), buf)
+            BufResult(Ok(to_write), buf)
         }
     }
 
@@ -933,4 +1034,461 @@ mod tests {
         assert_eq!(buf.remaining().len(), 20);
         assert_eq!(buf.remaining(), b"BBBBBBBBBBBBBBBBBBBB");
     }
+
+    // --- flush_at_to Tests ---
+
+    #[compio::test]
+    async fn test_buffer_flush_at_to_basic() {
+        // 基本的 flush_at_to 测试
+        let mut buf = Buffer::from(&b"test_data"[..]);
+        let mut mock_file = MockFile::default();
+
+        let n = buf.flush_at_to(100, &mut mock_file).await.unwrap();
+        assert_eq!(n, 9);
+
+        // 验证 buffer 被重置
+        assert!(buf.is_empty());
+        assert!(buf.all_done());
+
+        // 验证 mock file 收到数据在正确的位置
+        assert_eq!(mock_file.get_content_at(100, 9), b"test_data");
+
+        // 验证文件其他位置是空的
+        assert_eq!(mock_file.get_content_at(0, 10), vec![0u8; 10]);
+        assert_eq!(mock_file.get_content_at(109, 10), vec![0u8; 10]);
+    }
+
+    #[compio::test]
+    async fn test_buffer_flush_at_to_partial_write() {
+        // 测试 flush_at_to 在需要多次写入时的正确性
+        // 这是我们修复的 bug 的核心场景
+        let mut buf = Buffer::from(&b"ABCDEFGHIJ"[..]); // 10 字节
+
+        // 创建一个每次最多写入 3 字节的 mock file
+        let mut mock_file = MockFile {
+            data: Arc::new(Mutex::new(BTreeMap::new())),
+            max_write_per_call: Some(3), // 每次最多写 3 字节
+            write_count: Arc::new(Mutex::new(0)),
+        };
+
+        // 写入到文件偏移量 50
+        let n = buf.flush_at_to(50, &mut mock_file).await.unwrap();
+        assert_eq!(n, 10);
+
+        // 验证文件内容正确
+        assert_eq!(mock_file.get_content_at(50, 10), b"ABCDEFGHIJ");
+
+        // 验证确实调用了多次写入（10 字节，每次最多 3 字节，至少需要 4 次）
+        let write_count = *mock_file.write_count.lock().unwrap();
+        assert!(write_count >= 4, "Expected at least 4 writes, got {}", write_count);
+
+        // 验证 buffer 被重置
+        assert!(buf.is_empty());
+    }
+
+    #[compio::test]
+    async fn test_buffer_flush_to_partial_write() {
+        // 测试 flush_to 在需要多次写入时的正确性
+        let mut buf = Buffer::from(&b"XYZ123"[..]); // 6 字节
+
+        // 创建一个每次最多写入 2 字节的 mock file
+        let mut mock_file = MockFile {
+            data: Arc::new(Mutex::new(BTreeMap::new())),
+            max_write_per_call: Some(2), // 每次最多写 2 字节
+            write_count: Arc::new(Mutex::new(0)),
+        };
+
+        let n = buf.flush_to(&mut mock_file).await.unwrap();
+        assert_eq!(n, 6);
+
+        // 验证文件内容正确（从偏移量 0 开始）
+        assert_eq!(mock_file.get_content_at(0, 6), b"XYZ123");
+
+        // 验证确实调用了多次写入（6 字节，每次最多 2 字节，需要 3 次）
+        let write_count = *mock_file.write_count.lock().unwrap();
+        assert_eq!(write_count, 3, "Expected exactly 3 writes, got {}", write_count);
+
+        // 验证 buffer 被重置
+        assert!(buf.is_empty());
+    }
+
+    #[compio::test]
+    async fn test_buffer_flush_at_to_offset_correctness() {
+        // 测试多次写入时偏移量递增的正确性
+        // 这是修复前 bug 的直接测试
+        let mut buf = Buffer::from(&b"0123456789"[..]); // 10 字节
+
+        // 每次只写 1 字节，会触发 10 次循环
+        let mut mock_file = MockFile {
+            data: Arc::new(Mutex::new(BTreeMap::new())),
+            max_write_per_call: Some(1),
+            write_count: Arc::new(Mutex::new(0)),
+        };
+
+        let offset = 200u64;
+        buf.flush_at_to(offset, &mut mock_file).await.unwrap();
+
+        // 验证每个字节都在正确的位置
+        for (i, &byte) in b"0123456789".iter().enumerate() {
+            let file_byte = mock_file.get_content_at(offset + i as u64, 1)[0];
+            assert_eq!(file_byte, byte, "Byte at offset {} should be {}, got {}", offset + i as u64, byte, file_byte);
+        }
+
+        // 验证确实调用了 10 次写入
+        let write_count = *mock_file.write_count.lock().unwrap();
+        assert_eq!(write_count, 10);
+    }
+
+    #[compio::test]
+    async fn test_buffer_flush_at_to_single_byte_writes() {
+        // 极端测试：每次只写 1 字节，大量数据
+        let data = b"The quick brown fox jumps over the lazy dog. \
+                    Pack my box with five dozen liquor jugs. \
+                    How vexingly quick daft zebras jump!";
+        let mut buf = Buffer::from(&data[..]);
+
+        // 每次只写 1 字节，会触发 N 次循环
+        let mut mock_file = MockFile {
+            data: Arc::new(Mutex::new(BTreeMap::new())),
+            max_write_per_call: Some(1),
+            write_count: Arc::new(Mutex::new(0)),
+        };
+
+        let offset = 10000u64;
+        let total = buf.flush_at_to(offset, &mut mock_file).await.unwrap();
+
+        // 验证写入了所有字节
+        assert_eq!(total, data.len());
+
+        // 验证写入次数等于数据长度
+        let write_count = *mock_file.write_count.lock().unwrap();
+        assert_eq!(write_count, data.len());
+
+        // 验证整个数据的完整性
+        let result = mock_file.get_content_at(offset, data.len());
+        assert_eq!(result, data.as_slice());
+    }
+
+    #[compio::test]
+    async fn test_buffer_flush_at_to_large_offset() {
+        // 测试极大的文件偏移量
+        let mut buf = Buffer::from(&b"LargeOffsetTest"[..]);
+
+        let mut mock_file = MockFile {
+            data: Arc::new(Mutex::new(BTreeMap::new())),
+            max_write_per_call: Some(1),
+            write_count: Arc::new(Mutex::new(0)),
+        };
+
+        // 使用一个接近 u32::MAX 的偏移量
+        let large_offset = 4_000_000_000u64;
+        buf.flush_at_to(large_offset, &mut mock_file).await.unwrap();
+
+        // 验证数据在正确的位置
+        assert_eq!(mock_file.get_content_at(large_offset, 15), b"LargeOffsetTest");
+
+        // 验证文件开头是空的
+        assert_eq!(mock_file.get_content_at(0, 10), vec![0u8; 10]);
+    }
+
+    #[compio::test]
+    async fn test_buffer_flush_at_to_unaligned_pattern() {
+        // 测试不对齐的写入模式：3字节 -> 5字节 -> 2字节
+        let mut buf = Buffer::from(&b"ABCDEF"[..]); // 6 字节
+
+        // 第一次写 3 字节，第二次写 2 字节，第三次写 1 字节
+        // 这样会测试 offset 递增的正确性
+        let mut mock_file = MockFile {
+            data: Arc::new(Mutex::new(BTreeMap::new())),
+            max_write_per_call: Some(3),
+            write_count: Arc::new(Mutex::new(0)),
+        };
+
+        let base_offset = 500u64;
+        buf.flush_at_to(base_offset, &mut mock_file).await.unwrap();
+
+        // 验证每个字节的位置
+        assert_eq!(mock_file.get_content_at(base_offset + 0, 3), b"ABC");
+        assert_eq!(mock_file.get_content_at(base_offset + 3, 2), b"DE");
+        assert_eq!(mock_file.get_content_at(base_offset + 5, 1), b"F");
+    }
+
+    #[compio::test]
+    async fn test_buffer_flush_to_zero_byte_write() {
+        // 测试写入 0 字节的边界情况
+        let mut buf = Buffer::with_capacity(10);
+        let mut mock_file = MockFile::default();
+
+        // 空 buffer 应该返回 0
+        let n = buf.flush_to(&mut mock_file).await.unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[compio::test]
+    async fn test_buffer_flush_at_to_zero_byte_write() {
+        // 测试 flush_at_to 写入 0 字节的边界情况
+        let mut buf = Buffer::with_capacity(10);
+        let mut mock_file = MockFile::default();
+
+        // 空 buffer 应该返回 0
+        let n = buf.flush_at_to(12345, &mut mock_file).await.unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[compio::test]
+    async fn test_buffer_flush_at_to_sparse_writes() {
+        // 测试稀疏写入：向同一个文件的多个不连续位置写入
+        let mut mock_file = MockFile {
+            data: Arc::new(Mutex::new(BTreeMap::new())),
+            max_write_per_call: None,
+            write_count: Arc::new(Mutex::new(0)),
+        };
+
+        // 第一次写入：offset 100
+        let mut buf1 = Buffer::from(&b"FIRST"[..]);
+        buf1.flush_at_to(100, &mut mock_file).await.unwrap();
+
+        // 第二次写入：offset 1000（相隔很远）
+        let mut buf2 = Buffer::from(&b"SECOND"[..]);
+        buf2.flush_at_to(1000, &mut mock_file).await.unwrap();
+
+        // 第三次写入：offset 50（在第一次之前）
+        let mut buf3 = Buffer::from(&b"THIRD"[..]);
+        buf3.flush_at_to(50, &mut mock_file).await.unwrap();
+
+        // 验证所有数据都在正确的位置
+        assert_eq!(mock_file.get_content_at(50, 5), b"THIRD");
+        assert_eq!(mock_file.get_content_at(100, 5), b"FIRST");
+        assert_eq!(mock_file.get_content_at(1000, 6), b"SECOND");
+
+        // 验证中间位置是空的
+        assert_eq!(mock_file.get_content_at(55, 45), vec![0u8; 45]);
+    }
+
+    #[compio::test]
+    async fn test_buffer_flush_at_to_very_small_chunks() {
+        // 测试极端的小块写入：每次只写 1 字节，测试循环逻辑的稳定性
+        let large_data = b"Lorem ipsum dolor sit amet, consectetur adipiscing elit. \
+                          Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. \
+                          Ut enim ad minim veniam, quis nostrud exercitation ullamco.";
+        let mut buf = Buffer::from(&large_data[..]);
+
+        let mut mock_file = MockFile {
+            data: Arc::new(Mutex::new(BTreeMap::new())),
+            max_write_per_call: Some(1),
+            write_count: Arc::new(Mutex::new(0)),
+        };
+
+        let offset = 777u64;
+        buf.flush_at_to(offset, &mut mock_file).await.unwrap();
+
+        // 验证写入了所有字节
+        assert_eq!(mock_file.get_content_at(offset, large_data.len()), large_data);
+
+        // 验证写入次数
+        let write_count = *mock_file.write_count.lock().unwrap();
+        assert_eq!(write_count, large_data.len());
+    }
+
+    // === 边界情况测试 ===
+
+    #[compio::test]
+    async fn test_buffer_retain_remaining_edge_cases() {
+        // 测试 retain_remaining 的边界情况
+        let mut buf = Buffer::from(&b"0123456789"[..]);
+
+        // 保留所有：..LEN
+        buf.retain_remaining(..10);
+        assert_eq!(buf.remaining(), b"0123456789");
+
+        // 重置后测试
+        let mut buf = Buffer::from(&b"ABCDEFG"[..]);
+        buf.retain_remaining(..0);
+        assert_eq!(buf.remaining(), b"");
+        assert!(buf.is_empty());
+
+        // 保留后半部分：3.. （从索引 3 开始到末尾）
+        let mut buf2 = Buffer::from(&b"0123456789"[..]);
+        buf2.retain_remaining(5..);
+        assert_eq!(buf2.remaining(), b"56789");
+    }
+
+    #[compio::test]
+    async fn test_buffer_split_remaining_off_at_boundary() {
+        // 测试在边界位置 split
+        let mut buf = Buffer::from(&b"ABCDEF"[..]);
+
+        // 在开头 split
+        let right = buf.split_remaining_off(0);
+        assert_eq!(buf.remaining(), b"");
+        assert_eq!(right.remaining(), b"ABCDEF");
+
+        // 在末尾 split
+        let mut buf = Buffer::from(&b"ABCDEF"[..]);
+        let right = buf.split_remaining_off(6);
+        assert_eq!(buf.remaining(), b"ABCDEF");
+        assert_eq!(right.remaining(), b"");
+    }
+
+    #[compio::test]
+    async fn test_buffer_shrink_to_limit_edge_cases() {
+        // 测试 shrink_to_limit 的各种边界情况
+
+        // 1. len > limit：不应 shrink（高负载保护）
+        let mut buf1 = Buffer::from(&b"ABCDEFGHIJ"[..]); // 10 bytes
+        buf1.shrink_to_limit(5); // limit < len
+        assert_eq!(buf1.buf().capacity(), 10); // capacity 不变
+
+        // 2. capacity <= limit：无需操作
+        let mut buf2 = Buffer::from(&b"AB"[..]); // 2 bytes, capacity 2
+        buf2.shrink_to_limit(10); // limit > capacity
+        assert_eq!(buf2.buf().capacity(), 2); // 保持不变
+
+        // 3. len <= limit < capacity：应该 shrink
+        let mut buf3 = Buffer::from(&b"AB"[..]); // 2 bytes, capacity 2
+        buf3.buf_mut().reserve(100); // 扩容到 102
+        buf3.shrink_to_limit(5); // 2 <= 5 < 102
+        assert!(buf3.buf().capacity() <= 5);
+    }
+
+    // === VectoredBuffer 边界测试 ===
+
+    #[compio::test]
+    async fn test_vectored_invalidate_entire_buffer() {
+        // 测试覆盖整个 buffer 的场景
+        let mut vbuf = VectoredBuffer::new();
+
+        // 写入一个 buffer
+        vbuf.read_from_at(b"HelloWorld", 0);
+        assert_eq!(vbuf.total_remaining_len(), 10);
+
+        // 覆盖整个 buffer
+        vbuf.read_from_at(b"XXXXXXXXXX", 0);
+        assert_eq!(vbuf.total_remaining_len(), 10);
+        assert_eq!(vbuf.iter_mut().count(), 1);
+
+        let mut iter = vbuf.iter_mut();
+        let buf = iter.next().unwrap();
+        assert_eq!(buf.remaining(), b"XXXXXXXXXX");
+    }
+
+    #[compio::test]
+    async fn test_vectored_exact_boundary_write() {
+        // 测试在 buffer 边界上刚好衔接的写入
+        let mut vbuf = VectoredBuffer::new();
+
+        // 写入 [0..5)
+        vbuf.read_from_at(b"AAAAA", 0);
+
+        // 写入 [5..10)，刚好衔接
+        vbuf.read_from_at(b"BBBBB", 5);
+
+        // 应该合并成一个 buffer
+        assert_eq!(vbuf.iter_mut().count(), 1);
+        let mut iter = vbuf.iter_mut();
+        let buf = iter.next().unwrap();
+        assert_eq!(buf.remaining(), b"AAAAABBBBB");
+    }
+
+    #[compio::test]
+    async fn test_vectored_overwrite_with_gap() {
+        // 测试覆盖中间一部分的场景
+        let mut vbuf = VectoredBuffer::new();
+
+        // 写入 [0..20)
+        vbuf.read_from_at(&[b'A'; 20], 0);
+
+        // 覆盖中间 [5..15)
+        vbuf.read_from_at(&[b'X'; 10], 5);
+
+        // 由于合并逻辑，所有相邻的 buffer 会被合并成一个
+        // 结果应该是单个 buffer [0..20)
+        assert_eq!(vbuf.iter_mut().count(), 1);
+
+        // 验证内容
+        let mut iter = vbuf.iter_mut();
+        let buf = iter.next().unwrap();
+
+        assert_eq!(buf.offset, 0);
+        assert_eq!(buf.remaining().len(), 20);
+
+        // 验证内容正确：[0..5) 是 A, [5..15) 是 X, [15..20) 是 A
+        assert_eq!(&buf.remaining()[..5], &[b'A'; 5]);
+        assert_eq!(&buf.remaining()[5..15], &[b'X'; 10]);
+        assert_eq!(&buf.remaining()[15..], &[b'A'; 5]);
+    }
+
+    // === 内存管理测试 ===
+
+    #[compio::test]
+    async fn test_buffer_compact_does_not_change_capacity() {
+        // 验证 compact 不改变容量，只移动数据
+        let mut buf = Buffer::with_capacity(100);
+
+        // 写入一些数据
+        let _ = buf.read_from(b"ABCDEFGH");
+
+        // 消费一部分
+        buf.advance(3);
+
+        // 获取 compact 前的容量
+        let capacity_before = buf.buf().capacity();
+
+        // Compact
+        buf.compact();
+
+        // 验证容量不变
+        assert_eq!(buf.buf().capacity(), capacity_before);
+
+        // 验证数据已移动到前面
+        // After advance(3) on "ABCDEFGH", remaining is "DEFGH"
+        assert_eq!(buf.remaining(), b"DEFGH");
+        assert_eq!(buf.get_position(), 0);
+    }
+
+    #[compio::test]
+    async fn test_buffer_shrink_to_fit_without_compact() {
+        // 验证 shrink_to_fit 在不 compact 时的行为
+        let mut buf = Buffer::with_capacity(100);
+
+        // 写入数据并消费一部分
+        let _ = buf.read_from(b"ABCDEFGH");
+        buf.advance(3); // pos = 3, remaining = "EFGH"
+
+        // 获取当前状态
+        let len_before = buf.buf().len();
+        let capacity_before = buf.buf().capacity();
+
+        // shrink_to_fit 不 compact，所以前面的空间不会被释放
+        buf.shrink_to_fit();
+
+        // 验证：长度不变（因为有 consumed space）
+        assert_eq!(buf.buf().len(), len_before);
+
+        // 验证：容量可能减少，但至少能容纳现有数据
+        assert!(buf.buf().capacity() >= len_before);
+        assert!(buf.buf().capacity() <= capacity_before);
+    }
+
+    #[compio::test]
+    async fn test_buffer_reserve_behavior() {
+        // 测试 reserve 的行为
+        let mut buf = Buffer::with_capacity(10);
+
+        // 初始容量
+        let initial_cap = buf.buf().capacity();
+        assert_eq!(initial_cap, 10);
+
+        // Reserve 额外空间
+        buf.reserve(20);
+
+        // 容量应该至少容纳 initial_cap + 20 字节
+        // Vec::reserve 的行为是确保 capacity >= len + additional
+        // 但由于我们还没有写入数据，len 是 0
+        // 所以 reserve(20) 只保证 capacity >= 20
+        assert!(buf.buf().capacity() >= 20);
+    }
+
+    // === Range 追踪测试 ===
+    // Note: Tests for SeqBufFile range tracking should be in buffered_file.rs tests
 }

@@ -2,40 +2,19 @@ use crate::{
     Error as PersistError,
     registry::{PersistableState, TupleEntry},
 };
+use compio::fs::create_dir_all;
 use falcon_config::get_config_path;
-use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, TableError, TableHandle};
+use redb::{
+    Database, DatabaseError, ReadableDatabase, ReadableTable, StorageError, TableDefinition, TableError, TableHandle,
+};
 use std::{collections::HashMap, path::Path};
 use tracing::{debug, info, instrument, trace, warn};
 use xxhash_rust::xxh3::Xxh3Builder;
 
 /// Persistent storage abstraction for state recovery and persistence.
 ///
-/// `PersistStore` provides a typed interface for persisting and loading application state
-/// using `redb` as the underlying database. It supports content-based deduplication via
-/// xxHash to avoid unnecessary writes when data hasn't changed.
-///
-/// # Features
-///
-/// - Content-addressed storage using xxHash for change detection
-/// - Automatic serialization/deserialization via `bitcode`
-/// - Type-safe state persistence through the `PersistableState` trait
-/// - Configurable database location (defaults to config directory)
-///
-/// # Examples
-///
-/// ```ignore
-/// // Create a store at a specific path
-/// let store = PersistStore::create("/path/to/db.redb")?;
-///
-/// // Or create in the default config directory
-/// let store = PersistStore::new("app_state.redb")?;
-///
-/// // Persist some state
-/// store.refresh(my_state)?;
-///
-/// // Load it back
-/// let loaded: Option<MyState> = store.load()?;
-/// ```
+/// Provides a typed interface for persisting and loading application state using `redb`
+/// as the underlying database with content-based deduplication via xxHash.
 pub struct PersistStore {
     db: Database,
 }
@@ -46,45 +25,57 @@ impl PersistStore {
 
     /// Creates a new persistent store at the specified path.
     ///
-    /// # Arguments
-    ///
-    /// * `path` - Path where the database file will be created
-    ///
     /// # Errors
     ///
     /// Returns an error if the database cannot be created at the specified path.
     #[instrument(fields(path = %path.as_ref().display()))]
     pub fn create(path: impl AsRef<Path>) -> Result<Self, PersistError> {
         let db = Database::create(path.as_ref())?;
-        debug!("Persist store created");
+        debug!("Persistent store initialized");
         Ok(Self { db })
+    }
+
+    /// Opens an existing persistent store or creates a new one at the specified path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if database creation or opening fails.
+    #[instrument(fields(path = %path.as_ref().display()))]
+    pub async fn open_or_create(path: impl AsRef<Path>) -> Result<Self, PersistError> {
+        let path_ref = path.as_ref();
+        match Database::open(path_ref) {
+            Ok(db) => {
+                return Ok(Self { db });
+            }
+            Err(DatabaseError::Storage(StorageError::Io(e))) if e.kind() == std::io::ErrorKind::NotFound => {
+                // 如果找不到就进入创建分支，但是上面的 notfound 真的正确吗
+            }
+            Err(e) => return Err(e.into()),
+        }
+        if let Some(parent) = path_ref.parent() {
+            create_dir_all(parent).await?;
+        }
+        Ok(Database::create(path_ref).map(|db| Self { db })?)
     }
 
     /// Creates a new persistent store in the configuration directory.
     ///
-    /// # Arguments
-    ///
-    /// * `db_name` - Name of the database file (will be created in the config directory)
-    ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - The configuration directory cannot be located
-    /// - The database cannot be created
+    /// Returns an error if the configuration directory cannot be located or the database cannot be created.
     #[instrument(fields(db_name = %db_name))]
     pub fn new(db_name: &str) -> Result<Self, PersistError> {
         let cfg_path = get_config_path().map_err(|_| PersistError::DirNotFound)?;
         let cfg_dir = cfg_path.parent().ok_or(PersistError::DirNotFound)?;
         let path = cfg_dir.join(db_name);
         let db = Database::create(&path)?;
-        debug!("Persist store created in config directory");
+        debug!(db_path = %path.display(), "Persistent store initialized in config directory");
         Ok(Self { db })
     }
 
     /// Compacts the database to reclaim space.
     ///
-    /// This operation can be expensive and should be called sparingly,
-    /// typically during application shutdown or maintenance windows.
+    /// This operation can be expensive and should be called sparingly, typically during shutdown.
     ///
     /// # Errors
     ///
@@ -92,32 +83,17 @@ impl PersistStore {
     #[instrument(skip(self))]
     pub fn compact(&mut self) -> Result<(), PersistError> {
         self.db.compact()?;
-        debug!("Database compaction completed");
+        debug!("Database compaction completed successfully");
         Ok(())
     }
 
     /// Persists or updates state in the store.
     ///
-    /// This method uses content hashing (xxHash) to detect changes:
-    /// - If the content hash matches the stored hash, the write is skipped
-    /// - Otherwise, the old table is deleted and replaced with new data
-    ///
-    /// # Arguments
-    ///
-    /// * `content` - The state to persist
-    ///
-    /// # Type Parameters
-    ///
-    /// * `T` - Type implementing `PersistableState`
+    /// Uses content hashing (xxHash) to detect changes and skips write if content is unchanged.
     ///
     /// # Errors
     ///
     /// Returns an error if serialization or database operations fail.
-    ///
-    /// # Performance
-    ///
-    /// The method computes a hash over all items, serializes them upfront,
-    /// and only writes to disk if the content has changed.
     #[instrument(skip(self, content), fields(table_name = %T::TABLE_DEF.name()))]
     #[inline]
     pub fn refresh<T>(&self, content: T) -> Result<(), PersistError>
@@ -125,7 +101,7 @@ impl PersistStore {
         T: PersistableState,
         T::Item: TupleEntry,
     {
-        //  生成 hash 并提前序列化（主要是没有借用迭代器导致的，不过考虑到影响并不大）
+        // Compute hash and serialize upfront for change detection
         let hasher = Xxh3Builder::new().build();
         let mut hash = 0u64;
         let mut serde_map: HashMap<Box<[u8]>, Box<[u8]>> = HashMap::new();
@@ -139,32 +115,52 @@ impl PersistStore {
             hash ^= hasher.digest();
             serde_map.insert(kb, vb);
         }
-        debug!(content_hash = %hash, entry_count = serde_map.len(), "Computed content hash");
+        debug!(
+            content_hash = %hash,
+            entry_count = serde_map.len(),
+            table_name = %T::TABLE_DEF.name(),
+            "Content hash computed"
+        );
 
-        // 检查是否需要更新
+        // Check if update is needed
         let should_update = {
             let txn = self.db.begin_read()?;
             match txn.open_table(Self::HASH_METADATA_TABLE) {
-                // 表存在就进行 hash 对比
+                // Compare hash if table exists
                 Ok(t) => t.get(T::TABLE_DEF.name())?.map_or_else(
                     || {
-                        // hash 记录不存在，需要更新
-                        debug!("Hash record not found, performing initial persist");
+                        // No hash record exists, needs update
+                        debug!(
+                            table_name = %T::TABLE_DEF.name(),
+                            "No existing hash record, performing initial persist"
+                        );
                         true
                     },
                     |hash_acc| {
                         let old_hash = hash_acc.value();
                         if old_hash == hash {
-                            debug!("Content unchanged, skipping update");
+                            debug!(
+                                table_name = %T::TABLE_DEF.name(),
+                                content_hash = %hash,
+                                "Content unchanged, skipping persist"
+                            );
                             false
                         } else {
-                            debug!(old_hash = %old_hash, new_hash = %hash, "Content hash changed, update required");
+                            debug!(
+                                table_name = %T::TABLE_DEF.name(),
+                                old_hash = %old_hash,
+                                new_hash = %hash,
+                                "Content hash changed, update required"
+                            );
                             true
                         }
                     },
                 ),
                 Err(TableError::TableDoesNotExist(_)) => {
-                    debug!("Hash metadata table does not exist, performing initial persist");
+                    debug!(
+                        table_name = %T::TABLE_DEF.name(),
+                        "Hash metadata table does not exist, performing initial persist"
+                    );
                     true
                 }
                 Err(e) => return Err(e.into()),
@@ -173,8 +169,8 @@ impl PersistStore {
         if !should_update {
             return Ok(());
         }
-        // 删除旧表、创建新表、更新 hash
-        trace!(entry_count = serde_map.len(), "Writing items to table");
+        // Delete old table, create new table, update hash
+        trace!(entry_count = serde_map.len(), table_name = %T::TABLE_DEF.name(), "Writing entries to table");
         let txn = self.db.begin_write()?;
         txn.delete_table(T::TABLE_DEF)?;
         let mut table = txn.open_table(T::TABLE_DEF)?;
@@ -195,18 +191,11 @@ impl PersistStore {
     ///
     /// # Returns
     ///
-    /// * `Ok(Some(T))` - State was successfully loaded
-    /// * `Ok(None)` - Table doesn't exist (no data stored yet)
-    /// * `Err(e)` - Deserialization or database error occurred
-    ///
-    /// # Type Parameters
-    ///
-    /// * `T` - Type implementing `PersistableState`
+    /// Returns `Ok(Some(T))` if state exists, `Ok(None)` if table doesn't exist, or `Err` if deserialization fails.
     ///
     /// # Errors
     ///
-    /// Returns an error if deserialization fails for any entry.
-    /// Failed entries are logged and skipped, with partial data returned.
+    /// Returns an error if deserialization fails. Failed entries are logged and skipped with partial data returned.
     #[instrument(skip(self), fields(table_name = %T::TABLE_DEF.name()))]
     pub fn load<T>(&self) -> Result<Option<T>, PersistError>
     where
@@ -217,7 +206,7 @@ impl PersistStore {
         let table = match txn.open_table(T::TABLE_DEF) {
             Ok(t) => t,
             Err(TableError::TableDoesNotExist(_)) => {
-                debug!("Table does not exist, no data to load");
+                debug!(table_name = %T::TABLE_DEF.name(), "Table does not exist, no data to load");
                 return Ok(None);
             }
             Err(e) => return Err(e.into()),
@@ -226,28 +215,28 @@ impl PersistStore {
             let (k_acc, v_acc) = match res {
                 Ok(pair) => pair,
                 Err(err) => {
-                    warn!(error = %err, "Failed to iterate database entry");
+                    warn!(error = %err, table_name = %T::TABLE_DEF.name(), "Failed to access database entry");
                     return None;
                 }
             };
             let k = match bitcode::deserialize(k_acc.value()) {
                 Ok(k) => k,
                 Err(err) => {
-                    warn!(error = %err, "Failed to deserialize database key");
+                    warn!(error = %err, table_name = %T::TABLE_DEF.name(), "Failed to deserialize database key");
                     return None;
                 }
             };
             let v = match bitcode::deserialize(v_acc.value()) {
                 Ok(v) => v,
                 Err(err) => {
-                    warn!(error = %err, "Failed to deserialize database value");
+                    warn!(error = %err, table_name = %T::TABLE_DEF.name(), "Failed to deserialize database value");
                     return None;
                 }
             };
             Some(TupleEntry::zip(k, v))
         });
         let state = iter.collect::<T>();
-        info!("Table loaded successfully");
+        info!(table_name = %T::TABLE_DEF.name(), "Table loaded successfully");
         Ok(Some(state))
     }
 }

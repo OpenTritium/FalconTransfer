@@ -256,6 +256,10 @@ mod tests {
     #[test]
     fn test_acquire_token_overflow() {
         // Test bytes larger than u32::MAX
+        // TODO: This is a corner case for very large HTTP response chunks (>4GB).
+        // Consider chunking large responses at the HTTP client level to avoid this error.
+        // In practice, most servers don't send such large chunks, but streaming downloads
+        // of very large files could theoretically trigger this.
         let too_large = (u32::MAX as usize) + 1;
         let data = vec![0u8; too_large];
         let bytes = Bytes::from(data);

@@ -22,7 +22,6 @@ falcon_config = { path = "../config" }
 falcon_filesystem = { path = "../filesystem" }
 falcon_identity = { path = "../identity" }
 falcon_persist = { path = "../persist" }
-fastdate = "0.3.36"
 flume = { workspace = true }
 futures-util = { workspace = true }
 governor = "0.10.1"
@@ -32,7 +31,6 @@ multipart_async_stream = "0.2.4"
 percent-encoding = "2.3.2"
 redb = { workspace = true }
 regex = "1.11.2"
-sanitize-filename-reader-friendly = "2.3.0"
 see = { workspace = true }
 serde = { workspace = true }
 smol-cancellation-token = "0.1.1"

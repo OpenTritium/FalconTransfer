@@ -12,13 +12,14 @@ use crate::{
     utils::rate_limiter::SharedRateLimiter,
 };
 use async_broadcast as broadcast;
+use camino::Utf8PathBuf;
 use coarsetime::{Duration, Instant};
 use compio::{
     fs::{File, OpenOptions},
     runtime::{JoinHandle, spawn},
 };
 use falcon_config::config;
-use falcon_filesystem::assign_path;
+use falcon_filesystem::assign_path_unique;
 use falcon_identity::task::TaskId;
 use flume as mpmc;
 use futures_util::{StreamExt, select, stream::FuturesUnordered};
@@ -86,10 +87,10 @@ impl TaskState {
 /// 4. Provide persistent state broadcasting
 #[derive(Debug, TypedBuilder)]
 pub struct TaskDispatcher {
-    #[builder(default = broadcast::broadcast(1).0)]
-    persist_tasks: broadcast::Sender<PersistTaskStates>,
-    #[builder(default = broadcast::broadcast(1).0)]
-    persist_pendings: broadcast::Sender<PersistTaskPendings>,
+    #[builder(default)]
+    persist_tasks: Option<broadcast::Sender<PersistTaskStates>>,
+    #[builder(default)]
+    persist_pendings: Option<broadcast::Sender<PersistTaskPendings>>,
     cmd: mpmc::Receiver<TaskCommand>,
     #[allow(unused)]
     #[builder(default = broadcast::broadcast(1).1)]
@@ -125,11 +126,20 @@ impl TaskDispatcher {
     /// so channel should never be full - old messages are dropped instead.
     #[inline]
     fn broadcast_now(&mut self) {
+        let Some(persist_tasks) = &mut self.persist_tasks else {
+            debug!("Persist tasks broadcast not initialized, skipping broadcast");
+            return;
+        };
+        let Some(persist_pendings) = &mut self.persist_pendings else {
+            debug!("Persist pendings broadcast not initialized, skipping broadcast");
+            return;
+        };
+
         let states = PersistTaskStates(self.tasks.iter().map(|(&id, state)| (id, state.to_persist())).collect());
         let pendings = PersistTaskPendings(self.pendings.clone().into_iter().collect());
         // Broadcast both first to minimize inconsistent state window
-        let states_res = self.persist_tasks.try_broadcast(states);
-        let pendings_res = self.persist_pendings.try_broadcast(pendings);
+        let states_res = persist_tasks.try_broadcast(states);
+        let pendings_res = persist_pendings.try_broadcast(pendings);
         // Handle errors after both broadcasts attempted
         if let Err(err) = states_res {
             error!(error = %err, "Failed to broadcast task states");
@@ -149,8 +159,13 @@ impl TaskDispatcher {
     }
 
     /// Subscribes to persisted tasks broadcast before dispatcher starts.
-    pub fn subscribe_persisted_tasks(&self) -> broadcast::Receiver<PersistTaskStates> {
-        let mut rx = self.persist_tasks.new_receiver();
+    pub fn subscribe_persisted_tasks(&mut self) -> broadcast::Receiver<PersistTaskStates> {
+        if let Some(tx) = &self.persist_tasks {
+            return tx.new_receiver();
+        }
+        // Lazy create
+        let (tx, mut rx) = broadcast::broadcast(1);
+        self.persist_tasks = Some(tx);
         // Overflow mode: drop old messages when full, don't block dispatcher
         rx.set_overflow(true);
         // Don't keep sender active just because receiver exists
@@ -159,8 +174,13 @@ impl TaskDispatcher {
     }
 
     /// Subscribes to pending tasks broadcast after dispatcher starts.
-    pub fn subscribe_pendings(&self) -> broadcast::Receiver<PersistTaskPendings> {
-        let mut rx = self.persist_pendings.new_receiver();
+    pub fn subscribe_pendings(&mut self) -> broadcast::Receiver<PersistTaskPendings> {
+        if let Some(tx) = &self.persist_pendings {
+            return tx.new_receiver();
+        }
+        // Lazy create
+        let (tx, mut rx) = broadcast::broadcast(1);
+        self.persist_pendings = Some(tx);
         // Overflow mode: drop old messages when full, don't block dispatcher
         rx.set_overflow(true);
         // Don't keep sender active just because receiver exists
@@ -172,6 +192,29 @@ impl TaskDispatcher {
     #[inline]
     pub fn acquire_watchers(&self) -> impl Iterator<Item = (TaskId, watch::Receiver<TaskStatus>)> {
         self.tasks.iter().map(|(&id, state)| (id, state.status.subscribe()))
+    }
+
+    /// Restores running tasks by spawning workers for tasks that were running before shutdown.
+    ///
+    /// This should be called after restoring from persistent storage to auto-resume
+    /// tasks that were in running state and are not in the pendings set.
+    pub fn restore_running_tasks(&mut self) {
+        // Collect task IDs that need to be resumed first to avoid borrow checker issues
+        let tasks_to_resume: Box<[TaskId]> = self
+            .tasks
+            .iter()
+            .filter(|(id, _)| !self.pendings.contains(id))
+            .filter_map(|(&id, task)| {
+                let state = task.status.borrow().state;
+                if state.is_running() { Some(id) } else { None }
+            })
+            .collect();
+
+        // Now spawn workers for each task that needs to be resumed
+        for id in tasks_to_resume {
+            info!(task_id = %id, "Auto-resuming running task after restore");
+            self.spawn_many_worker(id);
+        }
     }
 
     /// Starts dispatcher main event loop.
@@ -277,12 +320,24 @@ impl TaskDispatcher {
                 let task = self.tasks.get_mut(&id);
                 if let Some(task) = task {
                     task.current_concurrency -= 1;
+                    // Special handling: EmptyRange means no work to do, don't retry
+                    if matches!(err, EmptyRange) {
+                        warn!(task_id = %id, "Worker assigned empty range, marking task as failed");
+                        Self::dispose_file(&mut task.file).await;
+                        let _ = task.status.send_if_modified(|status| {
+                            status.set_err(err);
+                            status.state.set_failed()
+                        });
+                        self.pendings.insert(id);
+                        self.broadcast_now();
+                        return;
+                    }
                     task.retries_left = task.retries_left.saturating_sub(1);
                     // Handle failed data rollback
                     if let Some(assigned_range) = assigned {
                         task.inflight -= &assigned_range;
                         // Special handling: preserve committed part if partially downloaded
-                        if let ParitalDownloaded(ref commited) = err {
+                        if let PartialDownloaded(ref commited) = err {
                             task.committed |= commited;
                             let revert = &assigned_range - commited;
                             // remaining must exist for multipart downloads
@@ -397,11 +452,12 @@ impl TaskDispatcher {
                         return true;
                     }
                     // Reopen file handle (decide how to open based on task state)
-                    let file = try {
+                    let file: Result<File, std::io::Error> = try {
                         match (task.file.take(), task.status.borrow().path.as_ref()) {
                             // First resume, no file handle or path: create new file
                             (None, None) => {
-                                let path = assign_path(task.meta.as_path_name(), task.meta.mime()).await?;
+                                let path: Utf8PathBuf =
+                                    assign_path_unique(task.meta.as_path_name(), task.meta.mime()).await?;
                                 let file = OpenOptions::new().create_new(true).write(true).open(&path).await?;
                                 task.status.send_modify(|s| s.path = path.into());
                                 file
@@ -484,13 +540,13 @@ impl TaskDispatcher {
                 }
                 warn!(task_id = %id, "Cannot remove task that is running or paused");
             }
-            // Create new task: assign file path, open file, spawn workers
+            // Create new task: assign unique file path, open file, spawn workers
             Ok(Create { box meta, box watch }) => {
                 info!(task_name = %meta.name(), "Creating new download task");
-                let path = match assign_path(meta.name(), meta.mime()).await {
+                let path: Utf8PathBuf = match assign_path_unique(meta.name(), meta.mime()).await {
                     Ok(path) => path,
                     Err(err) => {
-                        error!(error = %err, "Failed to assign file path for new task");
+                        error!(error = %err, "Failed to assign unique file path");
                         watch.send_modify(|status| {
                             status.set_err(err.into());
                             status.state.set_failed();
@@ -503,12 +559,13 @@ impl TaskDispatcher {
                 let id = watch.borrow().id;
                 match file {
                     Ok(file) => {
+                        info!(task_id = %id, path = %path, "File created successfully");
                         watch.send_modify(|s| s.path = path.into());
                         self.push_task(meta, watch, file.into());
                         self.spawn_many_worker(id);
                     }
                     Err(err) => {
-                        error!(task_id = %id, error = %err, "Failed to create file for new task");
+                        error!(task_id = %id, error = %err, path = %path, "Failed to create file");
                         watch.send_modify(|status| {
                             status.set_err(err.into());
                             status.state.set_failed();
@@ -548,16 +605,8 @@ impl TaskDispatcher {
             committed: Default::default(),
             remaining: full_content_range,
         };
-
-        // Broadcast task creation for persistence
-        if let Err(err) = self
-            .persist_tasks
-            .try_broadcast(PersistTaskStates(std::iter::once((id, task_state.to_persist())).collect()))
-        {
-            warn!(task_id = %id, error = %err, "Failed to broadcast new task for persistence");
-        }
-
         self.tasks.insert(id, task_state);
+        self.broadcast_now();
     }
 
     /// Spawns multiple workers for task based on concurrency config and remaining ranges.

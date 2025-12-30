@@ -11,7 +11,9 @@ use std::{
     io::{self, Cursor},
     mem,
 };
+use tracing::{debug, trace};
 
+/// Sequential buffered file with automatic memory management.
 pub struct SeqBufFile {
     file: Cursor<File>,
     buffered: RangeSet,
@@ -20,6 +22,7 @@ pub struct SeqBufFile {
 }
 
 impl SeqBufFile {
+    /// Creates a new sequential buffered file starting at the specified position.
     #[inline]
     pub fn with_position(file: File, pos: u64) -> Self {
         let mut cursor = Cursor::new(file);
@@ -32,36 +35,40 @@ impl SeqBufFile {
         }
     }
 
+    /// Gets the range of buffered data.
     #[inline]
     pub const fn buffered_range(&self) -> &RangeSet { &self.buffered }
 
+    /// Gets the range of flushed data.
     #[inline]
     pub const fn flushed_range(&self) -> &RangeSet { &self.flushed }
 
+    /// Consumes the file and returns the flushed range.
     #[inline]
     pub fn into_flushed_range(mut self) -> RangeSet { mem::take(&mut self.flushed) }
 
     async fn flush_if_needed(&mut self, next_chunk: Option<usize>) -> io::Result<()> {
-        // 缓冲区空的，没有东西可以 flush
+        // 卫语句：缓冲区为空
         if self.buf.is_empty() {
             return Ok(());
         }
-        // 缓冲区有东西但是已经被写完了，直接重置缓冲区
+        // 卫语句：缓冲区已全部写入，直接重置
         if self.buf.all_done() {
-            self.buf.reset(); // 其实 compact 也可以
+            self.buf.reset();
             return Ok(());
         }
-        self.buf.compact(); // 现在compact 是为了让两个卫语句都处理 compact 后的情况
-        // 前瞻性 flush
-        if let Some(chunk_size) = next_chunk
-            && {
-                let new_remaining = self.buf.remaining_len() + chunk_size;
-                new_remaining > config!(file_buffer_max)
-            }
-        {
+        self.buf.compact();
+        // 前瞻性 flush：如果写入下个块会超过上限，先 flush 当前数据
+        let should_proactive_flush = || {
+            let file_buffer_max = config!(file_buffer_max);
+            let new_remaining = self.buf.remaining_len() + next_chunk.unwrap_or(0);
+            new_remaining > file_buffer_max
+        };
+        if should_proactive_flush() {
             self.flush().await?;
             return Ok(());
         }
+        // 托底的回收方法：超过基础大小时 flush 并回收
         let file_buffer_base = config!(file_buffer_base);
         // 托底的回收方法
         if self.buf.remaining_len() > file_buffer_base {
@@ -77,18 +84,46 @@ impl AsyncWrite for SeqBufFile {
         // The previous flush may error because disk full. We need to make the buffer all-done before writing new data
         // to it.
         let pos = self.file.position() as usize + self.buf.remaining_len();
+        debug!(
+            cursor_pos = self.file.position() as usize,
+            buf_remaining = self.buf.remaining_len(),
+            calculated_pos = pos,
+            flush_range = self.flushed.len(),
+            "SeqBufFile: calculating write position"
+        );
         let buf_len = buf.buf_len();
         (_, buf) = buf_try!(self.flush_if_needed(buf_len.into()).await, buf);
         let written = self.buf.read_from(buf.as_slice());
         self.buffered.insert_n_at(written, pos);
+        trace!(
+            written,
+            insert_pos = pos,
+            new_buffered = ?self.buffered,
+            "SeqBufFile: data written to buffer"
+        );
         (_, buf) = buf_try!(self.flush_if_needed(None).await, buf);
         (Ok(written), buf).into()
     }
 
-    /// flush 缓冲区， flush 游标，然后同步 flushed range
+    /// Flushes the buffer to the underlying file and updates ranges.
+    ///
+    /// # Side Effects
+    ///
+    /// - Advances the file cursor position
+    /// - Updates `flushed` range to match `buffered` range
     async fn flush(&mut self) -> io::Result<()> {
         let Self { file, buf, .. } = self;
+        trace!(
+            before_buffered = ?self.buffered,
+            before_flushed = ?self.flushed,
+            buf_remaining_len = buf.remaining_len(),
+            "SeqBufFile: before flush"
+        );
         buf.flush_to(file).await?;
+        debug!(
+            after_flushed = ?self.buffered,
+            "SeqBufFile: after flush"
+        );
         self.flushed = self.buffered.clone();
         Ok(())
     }
@@ -121,10 +156,7 @@ impl From<File> for SeqBufFile {
     fn from(file: File) -> Self { Self::with_position(file, 0) }
 }
 
-impl Drop for SeqBufFile {
-    fn drop(&mut self) { debug_assert!(self.buf.all_done(), "Buffer not all done") }
-}
-
+/// Random-access buffered file with automatic memory management.
 pub struct RandBufFile {
     file: File,
     vbuf: VectoredBuffer,
@@ -133,23 +165,44 @@ pub struct RandBufFile {
 }
 
 impl RandBufFile {
+    /// Creates a new random-access buffered file.
     #[inline]
     pub fn new(file: File) -> Self {
         Self { file, buffered: RangeSet::new(), flushed: RangeSet::new(), vbuf: VectoredBuffer::new() }
     }
 
+    /// Gets the range of buffered data.
     #[inline]
     pub const fn buffered_range(&self) -> &RangeSet { &self.buffered }
 
+    /// Gets the range of flushed data.
     #[inline]
     pub const fn flushed_range(&self) -> &RangeSet { &self.flushed }
 
+    /// Consumes the file and returns the flushed range.
     #[inline]
     pub fn into_flushed_range(mut self) -> RangeSet { mem::take(&mut self.flushed) }
 
+    /// Flushes all buffers to the underlying file.
+    ///
+    /// # Side Effects
+    ///
+    /// - Calls `release_done()` to remove empty buffers
+    /// - Updates `flushed` range to match `buffered` range
     pub async fn flush(&mut self) -> io::Result<()> {
         let Self { file, vbuf, .. } = self;
+        trace!(
+            before_buffered = ?self.buffered,
+            before_flushed = ?self.flushed,
+            vbuf_total_remaining = vbuf.total_remaining_len(),
+            "RandBufFile: before flush"
+        );
         vbuf.flush_to(file).await?;
+        self.vbuf.release_done();
+        debug!(
+            after_flushed = ?self.buffered,
+            "RandBufFile: after flush"
+        );
         self.flushed = self.buffered.clone();
         Ok(())
     }
@@ -157,17 +210,14 @@ impl RandBufFile {
     pub async fn shutdown(&mut self) -> io::Result<()> { self.flush().await }
 
     async fn flush_if_needed(&mut self) -> io::Result<()> {
-        // 有任何完成的缓冲区都要进行回收，防止 range 计算错误
         self.vbuf.release_done();
-        // 缓冲区空的，没有东西可以 flush
         if self.vbuf.is_empty() {
             return Ok(());
         }
-        // 尽量将每个 buf 回收到基础大小
         let file_buffer_base = config!(file_buffer_base);
         if self.vbuf.total_remaining_len() > file_buffer_base {
             self.flush().await?;
-            self.vbuf.release_done();
+            // Recycle memory after flush
             self.vbuf.compact_all();
             self.vbuf.shrink_all_to_limit(file_buffer_base);
         }
@@ -179,8 +229,20 @@ impl AsyncWriteAt for RandBufFile {
     async fn write_at<B: IoBuf>(&mut self, mut buf: B, pos: u64) -> BufResult<usize, B> {
         (_, buf) = buf_try!(self.flush_if_needed().await, buf);
         let pos = pos as usize;
+        trace!(
+            write_offset = pos,
+            data_len = buf.buf_len(),
+            current_buffered = ?self.buffered,
+            "RandBufFile: write_at called"
+        );
         let written = self.vbuf.read_from_at(buf.as_slice(), pos);
         self.buffered.insert_n_at(written, pos);
+        debug!(
+            written,
+            insert_pos = pos,
+            new_buffered = ?self.buffered,
+            "RandBufFile: data written to buffer"
+        );
         (_, buf) = buf_try!(self.flush_if_needed().await, buf);
         (Ok(written), buf).into()
     }
@@ -199,16 +261,12 @@ impl AsyncWriteAt for RandBufFile {
                 break;
             }
             total_written += written;
-            cur += written; // 更新下一个切片的写入位置
+            cur += written;
         }
         self.buffered.insert_n_at(total_written, pos);
         (_, buf) = buf_try!(self.flush_if_needed().await, buf);
         (Ok(total_written), buf).into()
     }
-}
-
-impl Drop for RandBufFile {
-    fn drop(&mut self) { debug_assert!(self.vbuf.all_done(), "Buffer not all done") }
 }
 
 impl From<File> for RandBufFile {

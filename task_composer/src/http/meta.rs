@@ -1,13 +1,9 @@
-use crate::{
-    http::{header_map_ext::HeaderMapExt, worker::HTTP_CLIENT},
-    safe_filename::timebased_filename,
-    utils::safe_filename::SafeFileName,
-};
+use crate::http::{header_map_ext::HeaderMapExt, worker::HTTP_CLIENT};
 use camino::Utf8Path;
 use cyper::Response;
+use falcon_filesystem::{SafeFileName, timebased_filename};
 use http::header::CONTENT_TYPE;
 use mime::{APPLICATION_OCTET_STREAM, Mime};
-use sanitize_filename_reader_friendly::sanitize;
 use serde::{Deserialize, Serialize};
 use sparse_ranges::RangeSet;
 use std::{fmt, ops::Not};
@@ -90,7 +86,6 @@ impl From<Response> for HttpTaskMeta {
             .parse_filename()
             .ok()
             .or_else(|| parse_filename_from_url(url))
-            .map(|ref s| sanitize(s))
             .unwrap_or_else(|| timebased_filename(None))
             .as_str()
             .into();

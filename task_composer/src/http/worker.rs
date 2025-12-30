@@ -28,7 +28,7 @@ use smol_cancellation_token::CancellationToken;
 use sparse_ranges::{FrozenRangeSet, Range, RangeSet};
 use std::{sync::LazyLock, time::Duration};
 use thiserror::Error;
-use tracing::{debug, instrument, warn};
+use tracing::{debug, error, instrument, warn};
 use typed_builder::TypedBuilder;
 use url::Url;
 
@@ -76,7 +76,7 @@ pub enum WorkerError {
     #[error("Failed to parse HTTP response headers")]
     HeaderExt(#[from] HeaderMapExtError),
     #[error("Downloaded ranges do not match assigned ranges")]
-    ParitalDownloaded(RangeSet), // Not using FrozenRangeSet to avoid an extra conversion
+    PartialDownloaded(RangeSet), // Not using FrozenRangeSet to avoid an extra conversion
     #[error("Failed to parse multipart response stream")]
     MultiPartStream(#[from] multipart_async_stream::Error),
     #[error("Rate limit exceeded")]
@@ -213,7 +213,12 @@ impl Worker {
     async fn download_continuous(self) -> WorkerResult {
         let assigned = self.assign.expect("Assign is Some by spawn() guarantee");
         let start = assigned.start().expect("Range is non-empty by spawn() guarantee") as u64;
-        debug!("Starting continuous download for range");
+        debug!(
+            task_id = %self.id,
+            assigned = ?assigned,
+            start_pos = start,
+            "Starting continuous download"
+        );
         let range_header =
             assigned.to_http_range_header().expect("Range header valid for non-empty ranges").to_string();
         let resp = HTTP_CLIENT
@@ -224,6 +229,15 @@ impl Worker {
             .send()
             .await
             .map_err(|e| Self::make_failed(self.id, e.into(), Some(assigned.clone().into())))?;
+
+        debug!(
+            task_id = %self.id,
+            status = resp.status().as_u16(),
+            content_length = resp.headers().get("content-length").map(|v| v.to_str().ok()),
+            content_range = resp.headers().get("content-range").map(|v| v.to_str().ok()),
+            "HTTP response received"
+        );
+
         let mut byte_stream = resp.bytes_stream();
         let mut file = SeqBufFile::with_position(self.file, start);
         while let Some(body_res) = byte_stream.next().await {
@@ -244,15 +258,37 @@ impl Worker {
             if let BufResult(Err(e), _) = file.write_all(body).await {
                 cleanup_then_fail!(file, &self.status, self.id, File(e), Some(assigned.into()));
             }
+            debug!(
+                task_id = %self.id,
+                buffered = ?file.buffered_range(),
+                flushed = ?file.flushed_range(),
+                "Data written to buffer"
+            );
             Self::update_progress(&self.status, file.buffered_range(), file.flushed_range());
         }
         if let Err(e) = file.shutdown().await {
             cleanup_then_fail!(file, &self.status, self.id, File(e), Some(assigned.into()));
         }
         let flushed = file.into_flushed_range();
+        debug!(
+            task_id = %self.id,
+            assigned = ?assigned,
+            flushed = ?flushed,
+            assigned_len = assigned.len(),
+            flushed_len = flushed.len(),
+            "Checking if download is complete"
+        );
         Self::update_progress(&self.status, &flushed, &flushed);
         if flushed != assigned {
-            return Err(Self::make_failed(self.id, ParitalDownloaded(flushed), Some(assigned.into())));
+            error!(
+                task_id = %self.id,
+                assigned = ?assigned,
+                flushed = ?flushed,
+                assigned_len = assigned.len(),
+                flushed_len = flushed.len(),
+                "Downloaded ranges do not match assigned ranges"
+            );
+            return Err(Self::make_failed(self.id, PartialDownloaded(flushed), Some(assigned.into())));
         }
         Ok(WorkSuccess { id: self.id, flushed })
     }
@@ -266,6 +302,11 @@ impl Worker {
     #[instrument(name = "worker.sparse", skip(self), fields(task_id = %self.id, url = %self.url, range = ?self.assign))]
     async fn download_spare(self) -> WorkerResult {
         let assigned = self.assign.expect("Assign is Some by spawn() guarantee");
+        debug!(
+            task_id = %self.id,
+            assigned = ?assigned,
+            "Starting sparse (multipart) download"
+        );
         let range_header =
             assigned.to_http_range_header().expect("Range header valid for non-empty ranges").to_string();
         let resp = HTTP_CLIENT
@@ -342,6 +383,15 @@ impl Worker {
                     cleanup_then_fail!(file, &self.status, self.id, e.into(), Some(assigned.clone().into()));
                 }
                 cur += payload_len;
+                debug!(
+                    task_id = %self.id,
+                    part_range = ?part_assigned,
+                    write_offset = cur - payload_len,
+                    payload_len = payload_len,
+                    buffered = ?file.buffered_range(),
+                    flushed = ?file.flushed_range(),
+                    "Multipart part data written"
+                );
                 Self::update_progress(&self.status, file.buffered_range(), file.flushed_range());
             }
         }
@@ -349,9 +399,25 @@ impl Worker {
             cleanup_then_fail!(file, &self.status, self.id, e.into(), Some(assigned.clone().into()));
         }
         let flushed = file.into_flushed_range();
+        debug!(
+            task_id = %self.id,
+            assigned = ?assigned,
+            flushed = ?flushed,
+            assigned_len = assigned.len(),
+            flushed_len = flushed.len(),
+            "Checking if multipart download is complete"
+        );
         Self::update_progress(&self.status, &flushed, &flushed);
         if flushed != assigned {
-            Err(Self::make_failed(self.id, ParitalDownloaded(flushed), Some(assigned.clone().into())))
+            error!(
+                task_id = %self.id,
+                assigned = ?assigned,
+                flushed = ?flushed,
+                assigned_len = assigned.len(),
+                flushed_len = flushed.len(),
+                "Downloaded ranges do not match assigned ranges"
+            );
+            Err(Self::make_failed(self.id, PartialDownloaded(flushed), Some(assigned.clone().into())))
         } else {
             Ok(WorkSuccess { id: self.id, flushed })
         }

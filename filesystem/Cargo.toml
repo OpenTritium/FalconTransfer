@@ -9,9 +9,13 @@ compio = { workspace = true }
 criterion = { workspace = true }
 directories = "6.0.0"
 falcon_config = { path = "../config" }
+fastdate = "0.3.36"
 futures-util = { workspace = true }
 mime = { workspace = true }
+sanitize-filename-reader-friendly = "2.3.0"
+serde = { workspace = true }
 sparse_ranges = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

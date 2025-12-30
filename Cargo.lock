@@ -994,10 +994,14 @@ dependencies = [
  "criterion",
  "directories",
  "falcon_config",
+ "fastdate",
  "futures-util",
  "mime",
+ "sanitize-filename-reader-friendly",
+ "serde",
  "sparse_ranges",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -1065,7 +1069,6 @@ dependencies = [
  "falcon_filesystem",
  "falcon_identity",
  "falcon_persist",
- "fastdate",
  "flume 0.12.0",
  "futures-util",
  "governor",
@@ -1076,7 +1079,6 @@ dependencies = [
  "redb",
  "regex",
  "rstest",
- "sanitize-filename-reader-friendly",
  "see",
  "serde",
  "smol-cancellation-token",
