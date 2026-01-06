@@ -2,7 +2,10 @@ use crate::http::{header_map_ext::HeaderMapExt, worker::HTTP_CLIENT};
 use camino::Utf8Path;
 use cyper::Response;
 use falcon_filesystem::{SafeFileName, timebased_filename};
-use http::header::CONTENT_TYPE;
+use http::{
+    StatusCode,
+    header::{CONTENT_TYPE, RANGE},
+};
 use mime::{APPLICATION_OCTET_STREAM, Mime};
 use serde::{Deserialize, Serialize};
 use sparse_ranges::RangeSet;
@@ -76,12 +79,17 @@ impl From<Response> for HttpTaskMeta {
         }
         let headers = resp.headers();
         let url = resp.url();
-        let content_length = headers.parse_content_length();
         let content_type = headers
             .get(CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<Mime>().ok())
             .unwrap_or(APPLICATION_OCTET_STREAM);
+        // 优先从 content_range 解析总文件大小
+        let content_length = headers
+            .parse_single_content_range()
+            .map(|(_, total)| total)
+            .ok()
+            .or_else(|| headers.parse_content_length());
         let filename = headers
             .parse_filename()
             .ok()
@@ -89,7 +97,7 @@ impl From<Response> for HttpTaskMeta {
             .unwrap_or_else(|| timebased_filename(None))
             .as_str()
             .into();
-        let ranges_support = headers.parse_accept_ranges();
+        let ranges_support = resp.status() == StatusCode::PARTIAL_CONTENT || headers.parse_accept_ranges();
         Self { name: filename, size: content_length, mime: content_type, ranges_support, url: url.clone() }
     }
 }
@@ -112,16 +120,20 @@ impl fmt::Display for HttpTaskMeta {
     }
 }
 
-/// Fetches HTTP metadata from URL using HEAD request, falling back to GET.
-///
-/// TODO: Add request parameters.
-/// TODO: Try range request for 1 byte before full GET fallback.
 pub async fn fetch_meta(url: &Url) -> cyper::Result<HttpTaskMeta> {
-    if let Ok(resp) = HTTP_CLIENT.head(url.clone())?.send().await {
+    if let Ok(resp) = HTTP_CLIENT.head(url.clone())?.send().await
+        && resp.status().is_success()
+    {
         return Ok(resp.into());
     }
-    // Fallback to GET if HEAD fails
-    HTTP_CLIENT.get(url.clone())?.send().await.map(|resp| resp.into())
+    let range_resp = HTTP_CLIENT.get(url.clone())?.header(RANGE, "bytes=0-0")?.send().await;
+    if let Ok(resp) = range_resp
+        && resp.status().is_success()
+    {
+        return Ok(resp.into());
+    }
+    let final_resp = HTTP_CLIENT.get(url.clone())?.send().await?;
+    Ok(final_resp.into())
 }
 
 #[cfg(test)]

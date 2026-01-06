@@ -23,9 +23,23 @@ name = "fuzz_randfile"
 path = "fuzz_targets/fuzz_randfile.rs"
 test = false
 
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_buffer"
+path = "fuzz_targets/fuzz_buffer.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_vectored_buffer"
+path = "fuzz_targets/fuzz_vectored_buffer.rs"
+test = false
+
 [dependencies]
 arbitrary = { version = "1.4.2", features = ["derive"] }
-compio = { version = "0.16.1", features = ["all"] }
+compio = { version = "0.17.0", features = ["all"] }
 falcon_filesystem = { path = "../../filesystem" }
 libfuzzer-sys = "0.4"
-tempfile = "3.23.0"
+tempfile = "3.24.0"

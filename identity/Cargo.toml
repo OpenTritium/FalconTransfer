@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 bs58 = "0.5.1"
+nohash-hasher = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 uuid = { version = "1.18.1", features = ["v7"] }
-serde = { workspace = true }

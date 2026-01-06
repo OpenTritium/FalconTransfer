@@ -29,3 +29,5 @@ impl Display for TaskId {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "#{}", self.0) }
 }
+
+impl nohash_hasher::IsEnabled for TaskId {}

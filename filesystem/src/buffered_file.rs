@@ -5,11 +5,11 @@ use compio::{
     fs::File,
     io::{AsyncWrite, AsyncWriteAt},
 };
-use falcon_config::config;
 use sparse_ranges::RangeSet;
 use std::{
     io::{self, Cursor},
     mem,
+    num::NonZeroUsize,
 };
 use tracing::{debug, trace};
 
@@ -19,19 +19,23 @@ pub struct SeqBufFile {
     buffered: RangeSet,
     flushed: RangeSet,
     buf: Buffer,
+    buffer_base: NonZeroUsize,
+    buffer_max: NonZeroUsize,
 }
 
 impl SeqBufFile {
-    /// Creates a new sequential buffered file starting at the specified position.
     #[inline]
-    pub fn with_position(file: File, pos: u64) -> Self {
+    pub fn with_posistion(file: File, pos: u64, buffer_base: NonZeroUsize, buffer_max: NonZeroUsize) -> Self {
+        assert!(buffer_max >= buffer_base, "buffer_max must be greater than or equal to buffer_base");
         let mut cursor = Cursor::new(file);
         cursor.set_position(pos);
         Self {
             file: cursor,
             buffered: RangeSet::new(),
             flushed: RangeSet::new(),
-            buf: Buffer::with_capacity(config!(file_buffer_base)),
+            buf: Buffer::with_capacity(buffer_base.get(), buffer_max.get()),
+            buffer_base,
+            buffer_max,
         }
     }
 
@@ -48,32 +52,28 @@ impl SeqBufFile {
     pub fn into_flushed_range(mut self) -> RangeSet { mem::take(&mut self.flushed) }
 
     async fn flush_if_needed(&mut self, next_chunk: Option<usize>) -> io::Result<()> {
-        // 卫语句：缓冲区为空
         if self.buf.is_empty() {
             return Ok(());
         }
-        // 卫语句：缓冲区已全部写入，直接重置
+
         if self.buf.all_done() {
             self.buf.reset();
             return Ok(());
         }
         self.buf.compact();
-        // 前瞻性 flush：如果写入下个块会超过上限，先 flush 当前数据
+        // Proactive flush: if next chunk would exceed max, flush current data first
         let should_proactive_flush = || {
-            let file_buffer_max = config!(file_buffer_max);
             let new_remaining = self.buf.remaining_len() + next_chunk.unwrap_or(0);
-            new_remaining > file_buffer_max
+            new_remaining > self.buffer_max.get()
         };
         if should_proactive_flush() {
             self.flush().await?;
             return Ok(());
         }
-        // 托底的回收方法：超过基础大小时 flush 并回收
-        let file_buffer_base = config!(file_buffer_base);
-        // 托底的回收方法
-        if self.buf.remaining_len() > file_buffer_base {
+        // Fallback recycling: flush and shrink if exceeding base size
+        if self.buf.remaining_len() > self.buffer_base.get() {
             self.flush().await?;
-            self.buf.shrink_to_limit(file_buffer_base);
+            self.buf.shrink_to_limit(self.buffer_base.get());
         }
         Ok(())
     }
@@ -135,11 +135,11 @@ impl AsyncWrite for SeqBufFile {
         let mut total_written = 0;
         for buf in buf.iter_slice() {
             if buf.is_empty() {
-                continue; // 避免写入空切片导致提前 read from 提前返回0
+                continue; // Skip empty slices
             }
             let written = self.buf.read_from(buf);
             if written == 0 {
-                break; // 缓冲区写不下了，终止
+                break; // Buffer full
             }
             total_written += written;
         }
@@ -151,24 +151,46 @@ impl AsyncWrite for SeqBufFile {
     async fn shutdown(&mut self) -> io::Result<()> { self.flush().await }
 }
 
-impl From<File> for SeqBufFile {
-    #[inline]
-    fn from(file: File) -> Self { Self::with_position(file, 0) }
-}
-
 /// Random-access buffered file with automatic memory management.
 pub struct RandBufFile {
     file: File,
     vbuf: VectoredBuffer,
     buffered: RangeSet,
     flushed: RangeSet,
+    /// Buffer base size - target size after memory recycling
+    buffer_base: NonZeroUsize,
 }
 
 impl RandBufFile {
-    /// Creates a new random-access buffered file.
+    /// Creates a new random-access buffered file with explicit buffer size.
+    ///
+    /// # Arguments
+    ///
+    /// * `file` - The underlying file to buffer
+    /// * `buffer_base` - Target buffer size after memory recycling (must be > 0)
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use falcon_filesystem::RandBufFile;
+    /// use std::num::NonZeroUsize;
+    ///
+    /// # async fn example() -> std::io::Result<()> {
+    /// let file = compio::fs::File::create("test.txt").await?;
+    /// let base = NonZeroUsize::new(16 * 1024).unwrap();  // 16 KB
+    /// let rand_file = RandBufFile::new(file, base);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[inline]
-    pub fn new(file: File) -> Self {
-        Self { file, buffered: RangeSet::new(), flushed: RangeSet::new(), vbuf: VectoredBuffer::new() }
+    pub fn new(file: File, buffer_base: NonZeroUsize) -> Self {
+        Self {
+            file,
+            buffered: RangeSet::new(),
+            flushed: RangeSet::new(),
+            vbuf: VectoredBuffer::new(buffer_base.get()),
+            buffer_base,
+        }
     }
 
     /// Gets the range of buffered data.
@@ -214,12 +236,11 @@ impl RandBufFile {
         if self.vbuf.is_empty() {
             return Ok(());
         }
-        let file_buffer_base = config!(file_buffer_base);
-        if self.vbuf.total_remaining_len() > file_buffer_base {
+        if self.vbuf.total_remaining_len() > self.buffer_base.get() {
             self.flush().await?;
             // Recycle memory after flush
             self.vbuf.compact_all();
-            self.vbuf.shrink_all_to_limit(file_buffer_base);
+            self.vbuf.shrink_all_to_limit(self.buffer_base.get());
         }
         Ok(())
     }
@@ -269,11 +290,6 @@ impl AsyncWriteAt for RandBufFile {
     }
 }
 
-impl From<File> for RandBufFile {
-    #[inline]
-    fn from(file: File) -> Self { Self::new(file) }
-}
-
 #[cfg(test)]
 mod file_tests {
     use super::*;
@@ -281,8 +297,27 @@ mod file_tests {
         fs::OpenOptions,
         io::{AsyncReadAtExt, AsyncWrite, AsyncWriteAt},
     };
-    use std::path::Path;
+    use std::{num::NonZeroUsize, path::Path};
     use tempfile::TempDir;
+
+    /// Test buffer sizes (16KB base, 64KB max)
+    const TEST_BUFFER_BASE: usize = 16 * 1024;
+    const TEST_BUFFER_MAX: usize = 64 * 1024;
+
+    /// Helper to create SeqBufFile with test buffer sizes
+    fn seq_file_with_test_sizes(file: File) -> SeqBufFile {
+        SeqBufFile::with_posistion(
+            file,
+            0,
+            NonZeroUsize::new(TEST_BUFFER_BASE).unwrap(),
+            NonZeroUsize::new(TEST_BUFFER_MAX).unwrap(),
+        )
+    }
+
+    /// Helper to create RandBufFile with test buffer size
+    fn rand_file_with_test_size(file: File) -> RandBufFile {
+        RandBufFile::new(file, NonZeroUsize::new(TEST_BUFFER_BASE).unwrap())
+    }
     async fn read_all_at(path: &Path, pos: u64) -> (usize, Vec<u8>) {
         let another_file = OpenOptions::new().read(true).open(&path).await.unwrap();
         another_file.read_to_end_at(vec![], pos).await.unwrap()
@@ -293,7 +328,7 @@ mod file_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("seq_basic.bin");
         let file = OpenOptions::new().create_new(true).write(true).read(true).open(&path).await.unwrap();
-        let mut seq_file = SeqBufFile::from(file);
+        let mut seq_file = seq_file_with_test_sizes(file);
         let (written, _) = seq_file.write(b"Hello").await.unwrap();
         assert_eq!(written, 5);
         let (written, _) = seq_file.write(b" World").await.unwrap();
@@ -311,25 +346,25 @@ mod file_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("seq_threshold.bin");
         let file = OpenOptions::new().create_new(true).write(true).open(&path).await.unwrap();
-        let mut seq_file = SeqBufFile::from(file);
+        let mut seq_file = seq_file_with_test_sizes(file);
         let first_chunk = vec![1u8; 10_000]; // 第一块要小于 BASE_BUF_SIZE
-        let second_chunk = vec![1u8; config!(file_buffer_max) - 10_000]; // 第二个块大于 BASE 但小于 MAX
-        let third_chunk = vec![1u8; config!(file_buffer_max)]; // 巨无霸
+        let second_chunk = vec![1u8; TEST_BUFFER_MAX - 10_000]; // 第二个块大于 BASE 但小于 MAX
+        let third_chunk = vec![1u8; TEST_BUFFER_MAX]; // 巨无霸
         let (written, _) = seq_file.write(first_chunk).await.unwrap();
         assert_eq!(written, 10_000);
         assert!(seq_file.flushed_range().is_empty()); // 此时应该没有 flush
         // 第二次写入，此时会提前前瞻性 flush，然后写入最大量，然后继续 flush
         let (written, _) = seq_file.write(second_chunk).await.unwrap();
-        assert_eq!(written, config!(file_buffer_max) - 10_000); // 第二个块被全部写入了
-        assert_eq!(seq_file.flushed_range().len(), config!(file_buffer_max));
+        assert_eq!(written, TEST_BUFFER_MAX - 10_000); // 第二个块被全部写入了
+        assert_eq!(seq_file.flushed_range().len(), TEST_BUFFER_MAX);
         seq_file.flush().await.unwrap();
         let (bytes_read, buf) = read_all_at(&path, 0).await;
-        assert_eq!(bytes_read, config!(file_buffer_max));
+        assert_eq!(bytes_read, TEST_BUFFER_MAX);
         assert!(buf.iter().all(|&n| n == 1));
         let (written, _) = seq_file.write(third_chunk).await.unwrap(); // 只能写入最大值
-        assert_eq!(written, config!(file_buffer_max));
-        assert_eq!(seq_file.flushed_range().len(), config!(file_buffer_max) * 2);
-        assert_eq!(seq_file.buffered_range().len(), config!(file_buffer_max) * 2);
+        assert_eq!(written, TEST_BUFFER_MAX);
+        assert_eq!(seq_file.flushed_range().len(), TEST_BUFFER_MAX * 2);
+        assert_eq!(seq_file.buffered_range().len(), TEST_BUFFER_MAX * 2);
     }
 
     #[compio::test]
@@ -337,7 +372,7 @@ mod file_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("rand_basic.bin");
         let file = OpenOptions::new().create_new(true).write(true).read(true).open(&path).await.unwrap();
-        let mut rand_file = RandBufFile::from(file);
+        let mut rand_file = rand_file_with_test_size(file);
 
         // 写入 "World" at 10
         let (written, _) = rand_file.write_at(b"World", 10).await.unwrap();
@@ -369,7 +404,7 @@ mod file_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("rand_overwrite.bin");
         let file = OpenOptions::new().create_new(true).write(true).open(&path).await.unwrap();
-        let mut rand_file = RandBufFile::from(file);
+        let mut rand_file = rand_file_with_test_size(file);
 
         // 写入 "ABCDEFG" at 0
         rand_file.write_at(b"ABCDEFG", 0).await.unwrap(); // [0, 7)
@@ -395,7 +430,7 @@ mod file_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("rand_vec.bin");
         let file = OpenOptions::new().create_new(true).write(true).open(&path).await.unwrap();
-        let mut rand_file = RandBufFile::from(file);
+        let mut rand_file = rand_file_with_test_size(file);
 
         let parts: Vec<&[u8]> = vec![b"Data", b" ", b"Written", b" "];
         // expected_written = 4 + 1 + 7 + 1 = 13
@@ -422,11 +457,11 @@ mod file_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("rand_recycle.bin");
         let file = OpenOptions::new().create_new(true).write(true).read(true).open(&path).await.unwrap();
-        let mut rand_file = RandBufFile::from(file);
+        let mut rand_file = rand_file_with_test_size(file);
 
         // 构造足够多的数据来触发 flush_if_needed 的托底逻辑 (> BASE_BUF_SIZE)
         // 使用多个小块，确保 VectoredBuffer 内部创建多个 Buffer
-        let chunk_size = config!(file_buffer_base) / 4;
+        let chunk_size = TEST_BUFFER_BASE / 4;
         let num_chunks = 5; // 5 * (BASE_BUF_SIZE/4) > BASE_BUF_SIZE
 
         // 1. 连续写入多个不重叠的小块
@@ -461,7 +496,7 @@ mod file_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("seq_vec.bin");
         let file = OpenOptions::new().create_new(true).write(true).open(&path).await.unwrap();
-        let mut seq_file = SeqBufFile::from(file);
+        let mut seq_file = seq_file_with_test_sizes(file);
 
         let parts: Vec<&[u8]> = vec![b"Part1", b"", b"Part2", b"Part3"];
         // Part2 是空的，测试空切片跳过逻辑
@@ -480,7 +515,7 @@ mod file_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("rand_bridge.bin");
         let file = OpenOptions::new().create_new(true).write(true).open(&path).await.unwrap();
-        let mut rand_file = RandBufFile::from(file);
+        let mut rand_file = rand_file_with_test_size(file);
 
         // 1. 写入两头
         rand_file.write_at(b"AAAAA", 0).await.unwrap(); // [0, 5)
@@ -509,7 +544,7 @@ mod file_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("zero_len.bin");
         let file = OpenOptions::new().create_new(true).write(true).open(&path).await.unwrap();
-        let mut rand_file = RandBufFile::from(file);
+        let mut rand_file = rand_file_with_test_size(file);
 
         rand_file.write_at(b"Start", 0).await.unwrap();
 
@@ -535,7 +570,7 @@ mod file_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("mixed_cycle.bin");
         let file = OpenOptions::new().create_new(true).write(true).read(true).open(&path).await.unwrap();
-        let mut seq_file = SeqBufFile::from(file);
+        let mut seq_file = seq_file_with_test_sizes(file);
 
         // 第一波
         seq_file.write(b"123").await.unwrap();
@@ -559,7 +594,7 @@ mod file_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("seq_range.bin");
         let file = OpenOptions::new().create_new(true).write(true).read(true).open(&path).await.unwrap();
-        let mut seq_file = SeqBufFile::from(file);
+        let mut seq_file = seq_file_with_test_sizes(file);
 
         // 初始状态：ranges 都为空
         assert_eq!(seq_file.buffered_range().len(), 0);
@@ -602,7 +637,7 @@ mod file_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("rand_range.bin");
         let file = OpenOptions::new().create_new(true).write(true).read(true).open(&path).await.unwrap();
-        let mut rand_file = RandBufFile::from(file);
+        let mut rand_file = rand_file_with_test_size(file);
 
         // 初始状态
         assert_eq!(rand_file.buffered_range().len(), 0);
@@ -654,7 +689,7 @@ mod file_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("rand_merge.bin");
         let file = OpenOptions::new().create_new(true).write(true).read(true).open(&path).await.unwrap();
-        let mut rand_file = RandBufFile::from(file);
+        let mut rand_file = rand_file_with_test_size(file);
 
         // 写入三个分离的块
         rand_file.write_at(b"AAA", 0).await.unwrap(); // [0, 3)
@@ -693,7 +728,7 @@ mod file_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("rand_overwrite_range.bin");
         let file = OpenOptions::new().create_new(true).write(true).read(true).open(&path).await.unwrap();
-        let mut rand_file = RandBufFile::from(file);
+        let mut rand_file = rand_file_with_test_size(file);
 
         // 写入一个大块
         rand_file.write_at(b"AAAAAAAAAA", 0).await.unwrap(); // [0, 10)
@@ -730,7 +765,7 @@ mod file_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("seq_auto_flush_range.bin");
         let file = OpenOptions::new().create_new(true).write(true).read(true).open(&path).await.unwrap();
-        let mut seq_file = SeqBufFile::from(file);
+        let mut seq_file = seq_file_with_test_sizes(file);
 
         // 写入小块数据，不应触发 auto flush
         let small_chunk = vec![1u8; 1000];
@@ -739,20 +774,20 @@ mod file_tests {
         assert_eq!(seq_file.flushed_range().len(), 0);
 
         // 写入大块数据，应触发 auto flush
-        let large_chunk = vec![2u8; config!(file_buffer_max)];
+        let large_chunk = vec![2u8; TEST_BUFFER_MAX];
         seq_file.write(large_chunk).await.unwrap();
 
         // 因为前瞻性 flush，第一块和部分第二块应该被 flush
-        assert_eq!(seq_file.buffered_range().len(), 1000 + config!(file_buffer_max));
-        assert_eq!(seq_file.flushed_range().len(), 1000 + config!(file_buffer_max));
+        assert_eq!(seq_file.buffered_range().len(), 1000 + TEST_BUFFER_MAX);
+        assert_eq!(seq_file.flushed_range().len(), 1000 + TEST_BUFFER_MAX);
 
         seq_file.shutdown().await.unwrap();
 
         // 验证文件内容
         let (bytes_read, buf) = read_all_at(&path, 0).await;
-        assert_eq!(bytes_read, 1000 + config!(file_buffer_max));
+        assert_eq!(bytes_read, 1000 + TEST_BUFFER_MAX);
         assert!(buf[0..1000].iter().all(|&b| b == 1));
-        assert!(buf[1000..1000 + config!(file_buffer_max)].iter().all(|&b| b == 2));
+        assert!(buf[1000..1000 + TEST_BUFFER_MAX].iter().all(|&b| b == 2));
     }
 
     #[compio::test]
@@ -760,10 +795,10 @@ mod file_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("rand_auto_flush_range.bin");
         let file = OpenOptions::new().create_new(true).write(true).read(true).open(&path).await.unwrap();
-        let mut rand_file = RandBufFile::from(file);
+        let mut rand_file = rand_file_with_test_size(file);
 
         // 写入多个小块，累积超过 BASE_BUF_SIZE
-        let chunk_size = config!(file_buffer_base) / 3;
+        let chunk_size = TEST_BUFFER_BASE / 3;
 
         // 第一块
         let chunk1 = vec![1u8; chunk_size];
@@ -810,7 +845,7 @@ mod file_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("seq_multi_flush.bin");
         let file = OpenOptions::new().create_new(true).write(true).read(true).open(&path).await.unwrap();
-        let mut seq_file = SeqBufFile::from(file);
+        let mut seq_file = seq_file_with_test_sizes(file);
 
         // 多次 write + flush 循环
         for i in 0..10 {
@@ -845,7 +880,7 @@ mod file_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("rand_multi_flush.bin");
         let file = OpenOptions::new().create_new(true).write(true).read(true).open(&path).await.unwrap();
-        let mut rand_file = RandBufFile::from(file);
+        let mut rand_file = rand_file_with_test_size(file);
 
         let mut expected_len = 0;
 
@@ -883,7 +918,7 @@ mod file_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("rand_large_gap.bin");
         let file = OpenOptions::new().create_new(true).write(true).read(true).open(&path).await.unwrap();
-        let mut rand_file = RandBufFile::from(file);
+        let mut rand_file = rand_file_with_test_size(file);
 
         // 写入距离很远的两个块
         rand_file.write_at(b"START", 0).await.unwrap();
@@ -907,7 +942,7 @@ mod file_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("seq_vec_range.bin");
         let file = OpenOptions::new().create_new(true).write(true).read(true).open(&path).await.unwrap();
-        let mut seq_file = SeqBufFile::from(file);
+        let mut seq_file = seq_file_with_test_sizes(file);
 
         // 向量写入
         let parts: Vec<&[u8]> = vec![b"AAA", b"BBB", b"CCC"];
@@ -932,7 +967,7 @@ mod file_tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("rand_vec_range.bin");
         let file = OpenOptions::new().create_new(true).write(true).read(true).open(&path).await.unwrap();
-        let mut rand_file = RandBufFile::from(file);
+        let mut rand_file = rand_file_with_test_size(file);
 
         // 向量写入到指定位置
         let parts: Vec<&[u8]> = vec![b"AAA", b"BBB", b"CCC"];

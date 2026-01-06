@@ -595,12 +595,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "constcat"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "136d3e02915a2cea4d74caa8681e2d44b1c3254bdbf17d11d41d587ff858832c"
-
-[[package]]
 name = "cookie"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -687,6 +681,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tinytemplate",
+ "tokio",
  "walkdir",
 ]
 
@@ -1001,6 +996,7 @@ dependencies = [
  "serde",
  "sparse_ranges",
  "tempfile",
+ "tokio",
  "tracing",
 ]
 
@@ -1009,6 +1005,7 @@ name = "falcon_identity"
 version = "0.1.0"
 dependencies = [
  "bs58",
+ "nohash-hasher",
  "serde",
  "thiserror",
  "uuid",
@@ -1075,6 +1072,7 @@ dependencies = [
  "http",
  "mime",
  "multipart_async_stream",
+ "nohash-hasher",
  "percent-encoding",
  "redb",
  "regex",
@@ -1783,13 +1781,12 @@ dependencies = [
 
 [[package]]
 name = "multipart_async_stream"
-version = "0.2.4"
+version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f5f9768921de01c3c4bf3deb70c9ab7877da006652d7391ef44a4ec3805a1c2"
+checksum = "b8dba12ceb982eb2cb6fdeb6ee75d2937c7ee8eca734362630d1e53e3ee81b78"
 dependencies = [
  "async-iterator",
  "bytes",
- "constcat",
  "futures-util",
  "http",
  "httparse",
@@ -1825,6 +1822,12 @@ dependencies = [
  "thiserror",
  "winapi",
 ]
+
+[[package]]
+name = "nohash-hasher"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
 
 [[package]]
 name = "nonzero_ext"

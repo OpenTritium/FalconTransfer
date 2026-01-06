@@ -1,5 +1,6 @@
 use crate::{
-    HttpTaskMeta, TaskCommand, TaskDispatcher, TaskState, TaskStateDesc, TaskStatus, WorkerError, http::dispatcher,
+    HttpTaskMeta, TaskCommand, TaskDispatcher, TaskMap, TaskPendingSet, TaskState, TaskStateDesc, TaskStatus,
+    WorkerError, http::dispatcher,
 };
 use camino::Utf8PathBuf;
 use compio::fs::OpenOptions;
@@ -96,7 +97,7 @@ impl TaskDispatcher {
     async fn from_persisted(
         persisted_tasks: PersistTaskStates, persisted_pendings: PersistTaskPendings, cmd: mpmc::Receiver<TaskCommand>,
     ) -> Result<Self, dispatcher::Error> {
-        let mut tasks = HashMap::<TaskId, TaskState>::new();
+        let mut tasks = TaskMap::default();
         for (id, ptask) in persisted_tasks.into_iter() {
             match TaskState::from_persisted(id, ptask).await {
                 Ok(task) => {
@@ -112,7 +113,8 @@ impl TaskDispatcher {
         if let Some(max_id) = max_id {
             reset_task_id_generator(max_id.inner() + 1);
         }
-        let mut dispatcher = Self::builder().cmd(cmd).pendings(persisted_pendings.0).tasks(tasks).build();
+        let pendings = persisted_pendings.0.into_iter().collect::<TaskPendingSet>();
+        let mut dispatcher = Self::builder().cmd(cmd).pendings(pendings).tasks(tasks).build();
         // Auto-resume running tasks that are not in pendings
         dispatcher.restore_running_tasks();
         Ok(dispatcher)

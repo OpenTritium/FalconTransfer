@@ -3,10 +3,17 @@ name = "falcon_filesystem"
 version = "0.1.0"
 edition = "2024"
 
+[[bench]]
+harness = false
+name = "buffer_bench"
+
+[[bench]]
+harness = false
+name = "buffer_sizing"
+
 [dependencies]
 camino = { workspace = true }
 compio = { workspace = true }
-criterion = { workspace = true }
 directories = "6.0.0"
 falcon_config = { path = "../config" }
 fastdate = "0.3.36"
@@ -18,4 +25,9 @@ sparse_ranges = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 tempfile = { workspace = true }
+tokio = { version = "1.42", features = ["fs", "io-util", "rt-multi-thread"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }

@@ -1,0 +1,138 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on shared package cache
+    Blocking waiting for file lock on artifact directory
+warning: unexpected `cfg` condition name: `fuzzing`
+   --> /home/tritium/FalconTransfer/filesystem/src/buffer.rs:445:21
+    |
+445 |     #[cfg(any(test, fuzzing))]
+    |                     ^^^^^^^
+    |
+    = help: expected names are: `docsrs`, `feature`, and `test` and 31 more
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(fuzzing)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+    = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition name: `fuzzing`
+   --> /home/tritium/FalconTransfer/filesystem/src/buffer.rs:452:21
+    |
+452 |     #[cfg(any(test, fuzzing))]
+    |                     ^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(fuzzing)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: `falcon_filesystem` (lib) generated 2 warnings
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.88s
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+warning: unexpected `cfg` condition name: `fuzzing`
+   --> /home/tritium/FalconTransfer/filesystem/src/buffer.rs:445:21
+    |
+445 |     #[cfg(any(test, fuzzing))]
+    |                     ^^^^^^^
+    |
+    = help: expected names are: `docsrs`, `feature`, and `test` and 31 more
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(fuzzing)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+    = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition name: `fuzzing`
+   --> /home/tritium/FalconTransfer/filesystem/src/buffer.rs:452:21
+    |
+452 |     #[cfg(any(test, fuzzing))]
+    |                     ^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(fuzzing)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: `falcon_filesystem` (lib) generated 2 warnings
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.43s
+     Running `target/x86_64-unknown-linux-gnu/release/fuzz_buffer -artifact_prefix=/home/tritium/FalconTransfer/filesystem/fuzz/artifacts/fuzz_buffer/ -max_len=4096 -timeout=10 /home/tritium/FalconTransfer/filesystem/fuzz/corpus/fuzz_buffer`
+INFO: Running with entropic power schedule (0xFF, 100).
+INFO: Seed: 1288656138
+INFO: Loaded 1 modules   (16399 inline 8-bit counters): 16399 [0x564dd5f6c260, 0x564dd5f7026f), 
+INFO: Loaded 1 PC tables (16399 PCs): 16399 [0x564dd5f70270,0x564dd5fb0360), 
+INFO:      216 files found in /home/tritium/FalconTransfer/filesystem/fuzz/corpus/fuzz_buffer
+INFO: seed corpus: files: 216 min: 1b max: 2769b total: 67122b rss: 64Mb
+#218	INITED cov: 796 ft: 1126 corp: 111/16Kb exec/s: 0 rss: 64Mb
+#262144	pulse  cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 87381 rss: 427Mb
+#524288	pulse  cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 87381 rss: 430Mb
+#1048576	pulse  cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 95325 rss: 431Mb
+#2097152	pulse  cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 95325 rss: 431Mb
+#2854432	REDUCE cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 98428 rss: 431Mb L: 81/2585 MS: 4 ShuffleBytes-EraseBytes-CrossOver-EraseBytes-
+#4194304	pulse  cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 95325 rss: 433Mb
+#6878663	REDUCE cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 95536 rss: 434Mb L: 2584/2584 MS: 1 EraseBytes-
+#8227133	REDUCE cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 95664 rss: 434Mb L: 2583/2583 MS: 5 ShuffleBytes-InsertByte-ChangeByte-EraseBytes-InsertRepeatedBytes-
+#8388608	pulse  cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 95325 rss: 434Mb
+#8954425	REDUCE cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 95259 rss: 435Mb L: 2582/2582 MS: 1 EraseBytes-
+#14401928	REDUCE cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 96012 rss: 435Mb L: 2578/2578 MS: 2 ShuffleBytes-EraseBytes-
+#16777216	pulse  cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 95325 rss: 435Mb
+#18093452	REDUCE cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 95228 rss: 437Mb L: 225/2578 MS: 3 CMP-CopyPart-EraseBytes- DE: "F\000\000\000\000\000\000\000"-
+#23478528	REDUCE cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 95441 rss: 439Mb L: 647/2578 MS: 1 EraseBytes-
+#33554432	pulse  cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 95055 rss: 440Mb
+#50659301	REDUCE cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 93123 rss: 444Mb L: 224/2578 MS: 3 ChangeBit-EraseBytes-InsertByte-
+#67108864	pulse  cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 91428 rss: 446Mb
+#134217728	pulse  cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 85325 rss: 453Mb
+#158635502	REDUCE cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 82751 rss: 454Mb L: 644/2578 MS: 1 EraseBytes-
+#231343146	REDUCE cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 78024 rss: 456Mb L: 2577/2577 MS: 4 ChangeASCIIInt-ChangeBit-ShuffleBytes-CrossOver-
+#233036792	REDUCE cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 77964 rss: 456Mb L: 2576/2576 MS: 1 EraseBytes-
+#268435456	pulse  cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 76586 rss: 457Mb
+#279528127	REDUCE cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 77560 rss: 457Mb L: 2574/2574 MS: 4 CrossOver-ChangeBinInt-ShuffleBytes-EraseBytes-
+#347492205	REDUCE cov: 796 ft: 1126 corp: 111/16Kb lim: 4096 exec/s: 84404 rss: 458Mb L: 43/2574 MS: 2 ChangeBit-EraseBytes-
+#349806665	NEW    cov: 796 ft: 1127 corp: 112/16Kb lim: 4096 exec/s: 84616 rss: 458Mb L: 263/2574 MS: 5 CrossOver-InsertByte-CopyPart-ChangeByte-EraseBytes-
+#349806676	REDUCE cov: 796 ft: 1127 corp: 112/16Kb lim: 4096 exec/s: 84616 rss: 458Mb L: 218/2574 MS: 1 EraseBytes-
+#349806684	REDUCE cov: 796 ft: 1127 corp: 112/16Kb lim: 4096 exec/s: 84617 rss: 458Mb L: 191/2574 MS: 3 CrossOver-InsertByte-EraseBytes-
+#349807089	REDUCE cov: 796 ft: 1127 corp: 112/16Kb lim: 4096 exec/s: 84617 rss: 458Mb L: 166/2574 MS: 5 ChangeBit-ChangeByte-ChangeBit-ShuffleBytes-EraseBytes-
+#349807265	REDUCE cov: 796 ft: 1127 corp: 112/16Kb lim: 4096 exec/s: 84617 rss: 458Mb L: 155/2574 MS: 1 EraseBytes-
+#349807427	REDUCE cov: 796 ft: 1127 corp: 112/16Kb lim: 4096 exec/s: 84617 rss: 458Mb L: 154/2574 MS: 2 InsertByte-EraseBytes-
+#349809038	REDUCE cov: 796 ft: 1127 corp: 112/16Kb lim: 4096 exec/s: 84617 rss: 458Mb L: 146/2574 MS: 1 EraseBytes-
+#349809755	REDUCE cov: 796 ft: 1127 corp: 112/16Kb lim: 4096 exec/s: 84617 rss: 458Mb L: 136/2574 MS: 2 InsertByte-EraseBytes-
+#349810111	REDUCE cov: 796 ft: 1127 corp: 112/16Kb lim: 4096 exec/s: 84617 rss: 458Mb L: 134/2574 MS: 1 EraseBytes-
+#349811589	REDUCE cov: 796 ft: 1127 corp: 112/16Kb lim: 4096 exec/s: 84618 rss: 458Mb L: 131/2574 MS: 3 ChangeBinInt-CMP-EraseBytes- DE: "\366\377\377\377"-
+#349811764	REDUCE cov: 796 ft: 1127 corp: 112/16Kb lim: 4096 exec/s: 84618 rss: 458Mb L: 125/2574 MS: 5 ChangeBit-ChangeBinInt-ChangeBinInt-PersAutoDict-EraseBytes- DE: "\366\377\377\377"-
+#349817170	REDUCE cov: 796 ft: 1127 corp: 112/16Kb lim: 4096 exec/s: 84619 rss: 458Mb L: 122/2574 MS: 1 EraseBytes-
+#349820606	REDUCE cov: 796 ft: 1127 corp: 112/16Kb lim: 4096 exec/s: 84620 rss: 458Mb L: 116/2574 MS: 1 EraseBytes-
+#349856157	REDUCE cov: 796 ft: 1127 corp: 112/16Kb lim: 4096 exec/s: 84628 rss: 461Mb L: 115/2574 MS: 1 EraseBytes-
+#349863463	REDUCE cov: 796 ft: 1127 corp: 112/16Kb lim: 4096 exec/s: 84630 rss: 462Mb L: 114/2574 MS: 1 EraseBytes-
+#350372041	REDUCE cov: 796 ft: 1128 corp: 113/16Kb lim: 4096 exec/s: 84692 rss: 510Mb L: 242/2574 MS: 3 ChangeByte-InsertRepeatedBytes-CrossOver-
+#350372752	REDUCE cov: 796 ft: 1128 corp: 113/16Kb lim: 4096 exec/s: 84692 rss: 510Mb L: 232/2574 MS: 1 EraseBytes-
+#350403633	REDUCE cov: 796 ft: 1128 corp: 113/16Kb lim: 4096 exec/s: 84679 rss: 510Mb L: 226/2574 MS: 1 EraseBytes-
+#350712249	REDUCE cov: 796 ft: 1128 corp: 113/16Kb lim: 4096 exec/s: 84713 rss: 510Mb L: 225/2574 MS: 1 EraseBytes-
+#355976421	REDUCE cov: 796 ft: 1128 corp: 113/16Kb lim: 4096 exec/s: 85304 rss: 510Mb L: 113/2574 MS: 2 ChangeBit-EraseBytes-
+#472010569	REDUCE cov: 796 ft: 1128 corp: 113/16Kb lim: 4096 exec/s: 96407 rss: 510Mb L: 906/2574 MS: 3 ChangeBinInt-EraseBytes-CopyPart-
+#472083985	REDUCE cov: 796 ft: 1128 corp: 113/16Kb lim: 4096 exec/s: 96402 rss: 510Mb L: 904/2574 MS: 1 EraseBytes-
+#485035168	REDUCE cov: 796 ft: 1129 corp: 114/17Kb lim: 4096 exec/s: 97416 rss: 510Mb L: 497/2574 MS: 2 CopyPart-InsertRepeatedBytes-
+#485036705	REDUCE cov: 796 ft: 1129 corp: 114/17Kb lim: 4096 exec/s: 97416 rss: 510Mb L: 493/2574 MS: 2 ChangeByte-EraseBytes-
+#485040547	REDUCE cov: 796 ft: 1129 corp: 114/17Kb lim: 4096 exec/s: 97417 rss: 510Mb L: 469/2574 MS: 2 ChangeBit-EraseBytes-
+#485043763	REDUCE cov: 796 ft: 1129 corp: 114/17Kb lim: 4096 exec/s: 97417 rss: 510Mb L: 453/2574 MS: 1 EraseBytes-
+#485116630	REDUCE cov: 796 ft: 1129 corp: 114/17Kb lim: 4096 exec/s: 97412 rss: 530Mb L: 449/2574 MS: 1 EraseBytes-
+#492183996	REDUCE cov: 796 ft: 1129 corp: 114/17Kb lim: 4096 exec/s: 97771 rss: 538Mb L: 2572/2572 MS: 1 EraseBytes-
+#536870912	pulse  cov: 796 ft: 1129 corp: 114/17Kb lim: 4096 exec/s: 100481 rss: 538Mb
+#903871379	REDUCE cov: 796 ft: 1129 corp: 114/17Kb lim: 4096 exec/s: 115407 rss: 538Mb L: 2570/2570 MS: 3 EraseBytes-EraseBytes-CopyPart-
+#1073741824	pulse  cov: 796 ft: 1129 corp: 114/17Kb lim: 4096 exec/s: 119450 rss: 539Mb
+#1111863896	REDUCE cov: 796 ft: 1129 corp: 114/17Kb lim: 4096 exec/s: 120227 rss: 539Mb L: 2568/2568 MS: 1 EraseBytes-
+#1810982964	REDUCE cov: 796 ft: 1129 corp: 114/17Kb lim: 4096 exec/s: 128996 rss: 540Mb L: 642/2568 MS: 2 ChangeBit-EraseBytes-
+#2147483648	pulse  cov: 796 ft: 1129 corp: 114/17Kb lim: 4096 exec/s: 131320 rss: 540Mb
+#4294967296	pulse  cov: 796 ft: 1129 corp: 114/17Kb lim: 4096 exec/s: 137928 rss: 541Mb
+==2654== libFuzzer: run interrupted; exiting

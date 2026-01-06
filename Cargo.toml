@@ -21,10 +21,11 @@ compio = { version = "0.17.0", features = [
   "process",
   "time",
 ] }
-criterion = "0.8.1"
+criterion = { version = "0.8.1", features = ["async_tokio"] }
 flume = { version = "0.12.0", default-features = false, features = ["async"] }
 futures-util = "0.3.31"
 mime = "0.3.17"
+nohash-hasher = "0.2.0"
 redb = "3.1.0"
 rstest = "0.26.1"
 see = { git = "https://github.com/compio-rs/see.git", features = ["stream"] }

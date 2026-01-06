@@ -18,7 +18,7 @@ use compio::{
     time::timeout,
 };
 use cyper::Client;
-use falcon_config::config;
+use falcon_config::global_config;
 use falcon_filesystem::{RandBufFile, SeqBufFile};
 use falcon_identity::task::TaskId;
 use futures_util::{StreamExt, TryStreamExt};
@@ -26,7 +26,7 @@ use multipart_async_stream::{LendingIterator, MultipartStream};
 use see::sync as watch;
 use smol_cancellation_token::CancellationToken;
 use sparse_ranges::{FrozenRangeSet, Range, RangeSet};
-use std::{sync::LazyLock, time::Duration};
+use std::{num::NonZeroUsize, sync::LazyLock, time::Duration};
 use thiserror::Error;
 use tracing::{debug, error, instrument, warn};
 use typed_builder::TypedBuilder;
@@ -67,6 +67,15 @@ pub struct Worker {
     /// Optional assigned range(s). `None` means download entire file.
     #[builder(default, setter(strip_option))]
     assign: Option<FrozenRangeSet>,
+    /// Buffer base size for SeqBufFile and RandBufFile (cached from config)
+    #[builder(default = global_config().file_buffer_base)]
+    buffer_base: NonZeroUsize,
+    /// Buffer max size for SeqBufFile (cached from config)
+    #[builder(default = global_config().file_buffer_max)]
+    buffer_max: NonZeroUsize,
+    /// Worker timeout in minutes (cached from config)
+    #[builder(default = Duration::from_mins(global_config().worker_timeout_mins.get() as u64))]
+    timeout: Duration,
 }
 
 #[derive(Debug, Error)]
@@ -131,6 +140,7 @@ impl Worker {
 
     #[instrument(skip(self), fields(id = %self.id, range = ?self.assign))]
     pub fn spawn(self) -> WorkerFuture {
+        let dur = self.timeout;
         let timeout_err = Self::make_failed(self.id, Timeout, self.assign.clone().map(Into::into));
         let fut = async move {
             match self.assign {
@@ -140,8 +150,7 @@ impl Worker {
                 None => self.download_any().await,
             }
         };
-        let timeout_dur = Duration::from_mins(config!(worker_timeout_mins) as u64);
-        spawn(async move { timeout(timeout_dur, fut).await.map_err(|_| timeout_err).flatten() })
+        spawn(async move { timeout(dur, fut).await.map_err(|_| timeout_err).flatten() })
     }
 
     /// Updates task status by merging new buffered and flushed ranges.
@@ -167,7 +176,7 @@ impl Worker {
             .await
             .map_err(|e| Self::make_failed(self.id, e.into(), None))?;
         let mut byte_stream = resp.bytes_stream();
-        let mut file = SeqBufFile::from(self.file);
+        let mut file = SeqBufFile::with_posistion(self.file, 0, self.buffer_base, self.buffer_max);
         while let Some(body_res) = byte_stream.next().await {
             if self.child_cancel.is_cancelled() {
                 cleanup_then_fail!(file, &self.status, self.id, InitiateCancel, None);
@@ -239,7 +248,7 @@ impl Worker {
         );
 
         let mut byte_stream = resp.bytes_stream();
-        let mut file = SeqBufFile::with_position(self.file, start);
+        let mut file = SeqBufFile::with_posistion(self.file, start, self.buffer_base, self.buffer_max);
         while let Some(body_res) = byte_stream.next().await {
             if self.child_cancel.is_cancelled() {
                 cleanup_then_fail!(file, &self.status, self.id, InitiateCancel, Some(assigned.into()));
@@ -323,7 +332,7 @@ impl Worker {
             .map_err(|e| Self::make_failed(self.id, e.into(), Some(assigned.clone().into())))?;
         let byte_stream = resp.bytes_stream();
         let mut multipart = MultipartStream::new(byte_stream, &boundary);
-        let mut file = RandBufFile::new(self.file);
+        let mut file = RandBufFile::new(self.file, self.buffer_base);
         while let Some(part_res) = multipart.next().await {
             if self.child_cancel.is_cancelled() {
                 cleanup_then_fail!(file, &self.status, self.id, InitiateCancel, Some(assigned.into()));

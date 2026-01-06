@@ -10,113 +10,44 @@ use tracing::warn;
 
 const CONFIG_FOLDER_NAME: &str = "FalconTransfer";
 
-/// 定义带有 NonZero 字段的结构体，并自动生成返回内部类型的 getter
-macro_rules! define_config {
-    (
-        $(#[$struct_meta:meta])*
-        $vis:vis struct $name:ident {
-            $(
-                $(#[$field_meta:meta])*
-                $field:ident : $ty:ident
-            ),* $(,)?
-        }
-    ) => {
-        $(#[$struct_meta])*
-        $vis struct $name {
-            $(
-                $(#[$field_meta])*
-                pub $field: $ty,
-            )*
-        }
-
-        impl $name {
-            $(
-                $(#[$field_meta])*
-                #[inline]
-                pub fn $field(&self) -> define_config!(@inner $ty) {
-                    self.$field.get()
-                }
-            )*
-        }
-    };
-
-    // 类型映射
-    (@inner NonZeroU8) => { u8 };
-    (@inner NonZeroU16) => { u16 };
-    (@inner NonZeroU32) => { u32 };
-    (@inner NonZeroU64) => { u64 };
-    (@inner NonZeroU128) => { u128 };
-    (@inner NonZeroUsize) => { usize };
-    (@inner NonZeroI8) => { i8 };
-    (@inner NonZeroI16) => { i16 };
-    (@inner NonZeroI32) => { i32 };
-    (@inner NonZeroI64) => { i64 };
-    (@inner NonZeroI128) => { i128 };
-    (@inner NonZeroIsize) => { isize };
-}
-
-define_config! {
-    #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-    pub struct Config {
-        /// File buffer maximum size
-        file_buffer_max: NonZeroUsize,
-        /// File buffer base size
-        file_buffer_base: NonZeroUsize,
-        /// Worker max retry count
-        worker_max_retries: NonZeroU8,
-        /// Max concurrency
-        worker_max_concurrency: NonZeroU8,
-        /// Download block size
-        http_block_size: NonZeroUsize,
-        /// Worker timeout (minutes)
-        worker_timeout_mins: NonZeroU8,
-        /// Persist broadcast interval (seconds)
-        persist_broadcast_interval_secs: NonZeroU8,
-    }
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Config {
+    /// File buffer maximum size
+    pub file_buffer_max: NonZeroUsize,
+    /// File buffer base size
+    pub file_buffer_base: NonZeroUsize,
+    /// Worker max retry count
+    pub worker_max_retries: NonZeroU8,
+    /// Max concurrency
+    pub worker_max_concurrency: NonZeroU8,
+    /// Download block size
+    pub http_block_size: NonZeroUsize,
+    /// Worker timeout (minutes)
+    pub worker_timeout_mins: NonZeroU8,
+    /// Persist broadcast interval (seconds)
+    pub persist_broadcast_interval_secs: NonZeroU8,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            file_buffer_max: NonZeroUsize::new(0x40 * 0x400 * 0x400).unwrap(), // 64 MiB
-            file_buffer_base: NonZeroUsize::new(0x4000).unwrap(),              // 16 KiB
+            file_buffer_max: NonZeroUsize::new(128 * 1024).unwrap(), // 128 KiB
+            file_buffer_base: NonZeroUsize::new(64 * 1024).unwrap(), // 64 KiB
             worker_max_retries: NonZeroU8::new(32).unwrap(),
             worker_max_concurrency: NonZeroU8::new(8).unwrap(),
-            http_block_size: NonZeroUsize::new(0x100_0000).unwrap(), // 16 MiB
+            http_block_size: NonZeroUsize::new(0x100_0000).unwrap(), // 32 MiB
             worker_timeout_mins: NonZeroU8::new(3).unwrap(),         // 3 minutes
             persist_broadcast_interval_secs: NonZeroU8::new(5).unwrap(), // 5 seconds
         }
     }
 }
 
-/// 便捷访问全局配置的宏
-///
-/// # 用法
-/// - `config!()` - 获取 `&'static Config` 引用
-/// - `config!(field_name)` - 直接获取字段值
-///
-/// # 示例
-/// ```ignore
-/// let max = config!(file_buffer_max);  // 返回 usize
-/// let cfg = config!();                  // 返回 &'static Config
-/// ```
-#[macro_export]
-macro_rules! config {
-    () => {
-        $crate::global_config()
-    };
-    ($field:ident) => {
-        $crate::global_config().$field()
-    };
-}
-
 /// 验证配置是否满足规则要求
-pub fn validate_config(cfg: Config) -> ConfigResult<Config> {
-    if cfg.file_buffer_base() >= cfg.file_buffer_max() {
+pub fn validate(cfg: Config) -> ConfigResult<Config> {
+    if cfg.file_buffer_base >= cfg.file_buffer_max {
         Err(Error::Invalid(format!(
             "file_buffer_base({}) must be less than file_buffer_max({})",
-            cfg.file_buffer_base(),
-            cfg.file_buffer_max()
+            cfg.file_buffer_base, cfg.file_buffer_max
         )))
     } else {
         Ok(cfg)
@@ -126,8 +57,8 @@ pub fn validate_config(cfg: Config) -> ConfigResult<Config> {
 /// 加载并验证配置，如果验证失败则回退到默认配置
 fn load_and_validate_config() -> Config {
     let res: Result<Config, _> = confy::load(CONFIG_FOLDER_NAME, None);
-    res.map_err(Into::into).and_then(validate_config).unwrap_or_else(|err| {
-        warn!("Failed to load config file :{err}, fallback to default");
+    res.map_err(Into::into).and_then(validate).unwrap_or_else(|err| {
+        warn!(error = ?err, "Failed to load config file, fallback to default");
         Config::default()
     })
 }
@@ -205,11 +136,11 @@ mod tests {
     fn test_default_config_values() {
         let config = Config::default();
 
-        // file_buffer_max: 0x40 * 0x400 * 0x400 = 64 * 1024 * 1024 = 64MB
-        assert_eq!(config.file_buffer_max.get(), 64 * 1024 * 1024);
+        // file_buffer_max: 128 * 1024 = 128 KiB
+        assert_eq!(config.file_buffer_max.get(), 128 * 1024);
 
-        // file_buffer_base: 0x4000 = 16384 = 16KB
-        assert_eq!(config.file_buffer_base.get(), 16384);
+        // file_buffer_base: 64 * 1024 = 64 KiB
+        assert_eq!(config.file_buffer_base.get(), 64 * 1024);
 
         // worker_max_retries: 32
         assert_eq!(config.worker_max_retries.get(), 32);
@@ -217,7 +148,7 @@ mod tests {
         // worker_max_concurrency: 8
         assert_eq!(config.worker_max_concurrency.get(), 8);
 
-        // http_block_size: 0x100_0000 = 16MB
+        // http_block_size: 0x100_0000 = 16 MiB
         assert_eq!(config.http_block_size.get(), 0x100_0000);
     }
 
@@ -441,34 +372,20 @@ http_block_size = 16777216
     }
 
     #[test]
-    fn test_config_macro() {
-        // 测试 config!() 宏返回引用
-        let cfg_ref = config!();
-        assert!(std::ptr::eq(cfg_ref, global_config()));
-
-        // 测试 config!(field) 宏返回字段值
-        let max_buffer = config!(file_buffer_max);
-        assert_eq!(max_buffer, Config::default().file_buffer_max.get());
-
-        let retries = config!(worker_max_retries);
-        assert_eq!(retries, Config::default().worker_max_retries.get());
-    }
-
-    #[test]
-    fn test_getter_methods() {
+    fn test_config_field_access() {
         let config = Config::default();
 
-        // 测试所有 getter 方法
-        assert_eq!(config.file_buffer_max(), 64 * 1024 * 1024);
-        assert_eq!(config.file_buffer_base(), 16384);
-        assert_eq!(config.worker_max_retries(), 32);
-        assert_eq!(config.worker_max_concurrency(), 8);
-        assert_eq!(config.http_block_size(), 0x100_0000);
+        // 测试所有公共字段
+        assert_eq!(config.file_buffer_max.get(), 128 * 1024);
+        assert_eq!(config.file_buffer_base.get(), 64 * 1024);
+        assert_eq!(config.worker_max_retries.get(), 32);
+        assert_eq!(config.worker_max_concurrency.get(), 8);
+        assert_eq!(config.http_block_size.get(), 0x100_0000);
 
         // 使用自定义配置测试
         let custom = create_custom_config();
-        assert_eq!(custom.file_buffer_max(), 128 * 1024 * 1024);
-        assert_eq!(custom.worker_max_concurrency(), 16);
+        assert_eq!(custom.file_buffer_max.get(), 128 * 1024 * 1024);
+        assert_eq!(custom.worker_max_concurrency.get(), 16);
     }
 
     #[test]
@@ -562,11 +479,11 @@ http_block_size = 16777216
             persist_broadcast_interval_secs: NonZeroU8::new(1).unwrap(),
         };
 
-        // 验证 getter 方法能正确处理这些值
-        assert_eq!(extreme_config.file_buffer_max(), 4 * 1024 * 1024 * 1024);
-        assert_eq!(extreme_config.worker_max_retries(), u8::MAX);
-        assert_eq!(extreme_config.http_block_size(), 4 * 1024 * 1024 * 1024);
-        assert_eq!(extreme_config.file_buffer_base(), 1);
+        // 验证字段能正确处理这些值
+        assert_eq!(extreme_config.file_buffer_max.get(), 4 * 1024 * 1024 * 1024);
+        assert_eq!(extreme_config.worker_max_retries.get(), u8::MAX);
+        assert_eq!(extreme_config.http_block_size.get(), 4 * 1024 * 1024 * 1024);
+        assert_eq!(extreme_config.file_buffer_base.get(), 1);
 
         // 验证序列化和反序列化能正确处理这些值
         let toml_str = toml::to_string_pretty(&extreme_config).unwrap();
@@ -578,10 +495,10 @@ http_block_size = 16777216
     fn test_config_rule_validation() {
         // 测试有效配置 - 应该通过规则验证
         let valid_config = Config::default();
-        assert!(valid_config.file_buffer_base() < valid_config.file_buffer_max());
+        assert!(valid_config.file_buffer_base.get() < valid_config.file_buffer_max.get());
 
         // 使用公共函数验证配置
-        let result = validate_config(valid_config);
+        let result = validate(valid_config);
 
         // 验证有效配置通过规则验证
         assert!(result.is_ok());
@@ -593,10 +510,10 @@ http_block_size = 16777216
         let invalid_config = create_invalid_config();
 
         // 验证配置确实无效
-        assert!(invalid_config.file_buffer_base() >= invalid_config.file_buffer_max());
+        assert!(invalid_config.file_buffer_base.get() >= invalid_config.file_buffer_max.get());
 
         // 使用公共函数验证配置
-        let result = validate_config(invalid_config);
+        let result = validate(invalid_config);
 
         // 验证无效配置被规则拒绝
         assert!(result.is_err());
@@ -618,19 +535,19 @@ http_block_size = 16777216
         let invalid_config = create_invalid_config();
 
         // 验证配置确实无效
-        assert!(invalid_config.file_buffer_base() >= invalid_config.file_buffer_max());
+        assert!(invalid_config.file_buffer_base.get() >= invalid_config.file_buffer_max.get());
 
         // 应用验证函数
-        let result = validate_config(invalid_config);
+        let result = validate(invalid_config);
         assert!(result.is_err());
 
         // 验证当验证失败时，系统会回退到默认配置
         let fallback_config = result.unwrap_or_else(|_| Config::default());
-        assert_eq!(fallback_config.file_buffer_max(), 64 * 1024 * 1024);
-        assert_eq!(fallback_config.file_buffer_base(), 16384);
-        assert_eq!(fallback_config.worker_max_retries(), 32);
-        assert_eq!(fallback_config.worker_max_concurrency(), 8);
-        assert_eq!(fallback_config.http_block_size(), 0x100_0000);
+        assert_eq!(fallback_config.file_buffer_max.get(), 128 * 1024);
+        assert_eq!(fallback_config.file_buffer_base.get(), 64 * 1024);
+        assert_eq!(fallback_config.worker_max_retries.get(), 32);
+        assert_eq!(fallback_config.worker_max_concurrency.get(), 8);
+        assert_eq!(fallback_config.http_block_size.get(), 0x100_0000);
     }
 
     #[test]
@@ -644,8 +561,8 @@ http_block_size = 16777216
                 let config = Arc::clone(&config);
                 thread::spawn(move || {
                     // 在多个线程中读取配置
-                    let buffer_max = config.file_buffer_max();
-                    let retries = config.worker_max_retries();
+                    let buffer_max = config.file_buffer_max.get();
+                    let retries = config.worker_max_retries.get();
                     assert_eq!(buffer_max, Config::default().file_buffer_max.get());
                     assert_eq!(retries, Config::default().worker_max_retries.get());
                 })
@@ -664,20 +581,20 @@ http_block_size = 16777216
         let config = Config::default();
 
         // 验证缓冲区大小的合理性
-        assert!(config.file_buffer_max() > config.file_buffer_base());
-        assert!(config.file_buffer_base() >= 4096); // 至少 4KB
-        assert!(config.file_buffer_max() <= 1024 * 1024 * 1024); // 不超过 1GB
+        assert!(config.file_buffer_max.get() > config.file_buffer_base.get());
+        assert!(config.file_buffer_base.get() >= 4096); // 至少 4KB
+        assert!(config.file_buffer_max.get() <= 1024 * 1024 * 1024); // 不超过 1GB
 
         // 验证重试次数的合理性
-        assert!(config.worker_max_retries() > 0);
-        assert!(config.worker_max_retries() <= 100); // 不超过 100 次
+        assert!(config.worker_max_retries.get() > 0);
+        assert!(config.worker_max_retries.get() <= 100); // 不超过 100 次
 
         // 验证并发数的合理性
-        assert!(config.worker_max_concurrency() > 0);
-        assert!(config.worker_max_concurrency() <= 64); // 不超过 64
+        assert!(config.worker_max_concurrency.get() > 0);
+        assert!(config.worker_max_concurrency.get() <= 64); // 不超过 64
 
         // 验证 HTTP 块大小的合理性
-        assert!(config.http_block_size() >= 1024 * 1024); // 至少 1MB
-        assert!(config.http_block_size() <= 100 * 1024 * 1024); // 不超过 100MB
+        assert!(config.http_block_size.get() >= 1024 * 1024); // 至少 1MB
+        assert!(config.http_block_size.get() <= 100 * 1024 * 1024); // 不超过 100MB
     }
 }

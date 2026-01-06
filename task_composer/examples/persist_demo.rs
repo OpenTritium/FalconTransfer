@@ -10,7 +10,6 @@ use url::Url;
 
 const FOLDER_NAME_TEST: &str = "FalconTransferTests";
 
-// todo 任务恢复后想办法激发一下第一次下载
 #[compio::main]
 async fn main() {
     let subscriber = FmtSubscriber::builder()
@@ -68,7 +67,6 @@ async fn main() {
     // 10. 显示任务状态
     loop {
         // 等待新任务状态变化
-        status_rx.changed().await.unwrap();
         sleep(Duration::from_secs(1)).await;
 
         // 清屏，让显示更清晰
@@ -81,15 +79,9 @@ async fn main() {
         // 显示所有预览任务的状态
         if !preview_watchers.is_empty() {
             println!("\n=== Restored Tasks ===");
-            for (task_id, watcher) in &mut preview_watchers {
-                if watcher.changed().await.is_ok() {
-                    let status = watcher.borrow_and_update();
-                    println!("{}", status.as_ref());
-                } else {
-                    // 连接已断开，跳过
-                    let status = watcher.borrow();
-                    println!("{} (disconnected)", status.as_ref());
-                }
+            for (_, watcher) in &mut preview_watchers {
+                let status = watcher.borrow_and_update();
+                println!("{}", status.as_ref());
             }
         }
     }

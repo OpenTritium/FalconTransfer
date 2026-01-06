@@ -18,17 +18,19 @@ use compio::{
     fs::{File, OpenOptions},
     runtime::{JoinHandle, spawn},
 };
-use falcon_config::config;
+use falcon_config::global_config;
 use falcon_filesystem::assign_path_unique;
 use falcon_identity::task::TaskId;
 use flume as mpmc;
 use futures_util::{StreamExt, select, stream::FuturesUnordered};
+use nohash_hasher::NoHashHasher;
 use see::sync as watch;
 use smol_cancellation_token::CancellationToken;
 use sparse_ranges::RangeSet;
 use std::{
     any::Any,
     collections::{HashMap, HashSet},
+    hash::BuildHasherDefault,
     num::NonZeroU8,
     ops::Not,
     rc::Rc,
@@ -43,16 +45,16 @@ pub type JoinResult<T> = Result<T, Box<dyn Any + Send>>;
 pub struct TaskState {
     #[builder(setter(into))]
     pub meta: Rc<HttpTaskMeta>,
-    #[builder(default)]
     pub remaining: Option<RangeSet>,
+    #[builder(default)]
     pub committed: RangeSet,
     #[builder(default)]
     pub inflight: RangeSet,
-    #[builder(default = config!().worker_max_concurrency)]
+    #[builder(default = global_config().worker_max_concurrency)]
     pub max_concurrency: NonZeroU8,
     #[builder(default)]
     pub current_concurrency: u8,
-    #[builder(default = config!(worker_max_retries))]
+    #[builder(default = global_config().worker_max_retries.get() as u8)]
     pub retries_left: u8,
     #[builder(default)]
     pub file: Option<File>,
@@ -78,6 +80,9 @@ impl TaskState {
     }
 }
 
+pub type TaskMap = HashMap<TaskId, TaskState, BuildHasherDefault<NoHashHasher<TaskId>>>;
+pub type TaskPendingSet = HashSet<TaskId, BuildHasherDefault<NoHashHasher<TaskId>>>;
+
 /// Task dispatcher managing download task lifecycles.
 ///
 /// Core responsibilities:
@@ -96,15 +101,19 @@ pub struct TaskDispatcher {
     #[builder(default = broadcast::broadcast(1).1)]
     qos: broadcast::Receiver<QosAdvice>,
     #[builder(default)]
-    tasks: HashMap<TaskId, TaskState>,
+    tasks: TaskMap,
     #[builder(default)]
     workers: FuturesUnordered<WorkerFuture>,
     #[builder(default)]
-    pendings: HashSet<TaskId>,
+    pendings: TaskPendingSet,
     #[builder(default = Instant::recent())]
     last_broadcast: Instant,
-    #[builder(default)]
+    #[builder(default = Duration::from_secs(global_config().persist_broadcast_interval_secs.get() as u64))]
     broadcast_interval: Duration,
+    #[builder(default = global_config().worker_max_retries.get() as u8)]
+    max_retries: u8,
+    #[builder(default = global_config().http_block_size.get())]
+    block_size: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -225,8 +234,6 @@ impl TaskDispatcher {
     /// 3. Returns false on command channel close to exit loop
     #[instrument(skip_all)]
     pub fn spawn(mut self) -> JoinHandle<()> {
-        // Initialize broadcast interval and last_broadcast time
-        self.broadcast_interval = Duration::from_secs(config!().persist_broadcast_interval_secs() as u64);
         self.last_broadcast = Instant::now();
 
         let fut = async move {
@@ -444,7 +451,8 @@ impl TaskDispatcher {
                 use TaskStateDesc::*;
                 self.pendings.remove(id);
                 if let Some(task) = self.tasks.get_mut(id) {
-                    task.retries_left = config!(worker_max_retries);
+                    // Reset retries to initial cached value
+                    task.retries_left = self.max_retries;
                     info!(task_id = %id, "Task resumed, retry count reset");
                     let state = task.status.borrow().state;
                     if matches!(state, Completed | Idle) {
@@ -592,19 +600,7 @@ impl TaskDispatcher {
         let full_content_range = meta.full_content_range();
         let id = tx.borrow().id;
         info!(task_id = %id, task_name = %meta.name(), "Task registered in dispatcher");
-        let task_state = TaskState {
-            meta: meta.into(),
-            inflight: Default::default(),
-            max_concurrency: config!().worker_max_concurrency,
-            current_concurrency: 0,
-            retries_left: config!(worker_max_retries),
-            file,
-            cancel: CancellationToken::new(),
-            status: tx,
-            rate_limit: SharedRateLimiter::without_limit(),
-            committed: Default::default(),
-            remaining: full_content_range,
-        };
+        let task_state = TaskState::builder().status(tx).file(file).meta(meta).remaining(full_content_range).build();
         self.tasks.insert(id, task_state);
         self.broadcast_now();
     }
@@ -662,7 +658,7 @@ impl TaskDispatcher {
         let _ = task.status.send_if_modified(|status| status.state.set_running());
         // Split remaining ranges into chunks, each handled by one worker
         let remaining = task.remaining.as_mut().expect("Task supports ranges but have no content range");
-        let blocks = remaining.into_chunks(config!(http_block_size)).take(more_concurrency as usize);
+        let blocks = remaining.into_chunks(self.block_size).take(more_concurrency as usize);
         for blk in blocks {
             let file = task.file.clone().expect("File handle must exist when spawning worker");
             let fut = Worker::builder()
