@@ -26,7 +26,8 @@ async fn main() {
     let log = tracing_appender::rolling::daily("logs", "claw.log");
     let (writer, _guard) = tracing_appender::non_blocking(log);
     let file_layer = fmt::layer().with_writer(writer).json();
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // Enable debug logging for development
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
     tracing_subscriber::registry().with(filter).with(file_layer).init();
     std::panic::set_hook(Box::new(tracing_panic::panic_hook));
 

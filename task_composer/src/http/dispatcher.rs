@@ -304,7 +304,7 @@ impl TaskDispatcher {
                     // Update task state: remove from in-flight, add to committed
                     task.inflight -= &flushed;
                     task.committed |= &flushed;
-                    task.current_concurrency -= 1;
+                    task.current_concurrency = task.current_concurrency.saturating_sub(1);
                     // Check if task fully completed
                     if Self::check_or_set_finished(task) {
                         Self::dispose_file(&mut task.file).await;
@@ -326,7 +326,7 @@ impl TaskDispatcher {
                 warn!(task_id = %id, error = %err, "Worker failed");
                 let task = self.tasks.get_mut(&id);
                 if let Some(task) = task {
-                    task.current_concurrency -= 1;
+                    task.current_concurrency = task.current_concurrency.saturating_sub(1);
                     // Special handling: EmptyRange means no work to do, don't retry
                     if matches!(err, EmptyRange) {
                         warn!(task_id = %id, "Worker assigned empty range, marking task as failed");
@@ -438,6 +438,8 @@ impl TaskDispatcher {
                 self.pendings.insert(*id);
                 if let Some(task) = self.tasks.get_mut(id) {
                     task.cancel.cancel();
+                    // Reset concurrency counter immediately since workers are being cancelled
+                    task.current_concurrency = 0;
                     Self::dispose_file(&mut task.file).await;
                     info!(task_id = %id, "Task paused, file handle released");
                     let _ = task.status.send_if_modified(|status| status.state.set_paused());
@@ -453,7 +455,9 @@ impl TaskDispatcher {
                 if let Some(task) = self.tasks.get_mut(id) {
                     // Reset retries to initial cached value
                     task.retries_left = self.max_retries;
-                    info!(task_id = %id, "Task resumed, retry count reset");
+                    // Create new cancellation token since the old one was cancelled during pause
+                    task.cancel = CancellationToken::new();
+                    info!(task_id = %id, "Task resumed, retry count reset, cancellation token renewed");
                     let state = task.status.borrow().state;
                     if matches!(state, Completed | Idle) {
                         warn!(task_id = %id, "Cannot resume a completed or idle task");
