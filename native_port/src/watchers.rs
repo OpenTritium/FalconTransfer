@@ -107,7 +107,8 @@ fn map_status_to_info(status: &TaskStatus) -> TaskInfo {
 }
 
 #[instrument(skip(port))]
-pub async fn handle_watch_event(status: WatcherEvent, watchers: &mut WatchGroup, port: &mut NativePort) {
+#[must_use]
+pub async fn handle_watch_event(status: WatcherEvent, watchers: &mut WatchGroup, port: &mut NativePort) -> bool {
     match status {
         WatcherEvent::Updated(task) => {
             let id = task.id;
@@ -119,11 +120,15 @@ pub async fn handle_watch_event(status: WatcherEvent, watchers: &mut WatchGroup,
                 debug!(%id, "Task info update sent successfully");
                 watchers.mark_unchanged(id);
                 watchers.watch(id);
+                true
+            } else {
+                false
             }
         }
         WatcherEvent::Removed(task_id) => {
             info!(%task_id, "Task removed, cleaning up watcher");
             watchers.remove(task_id);
+            true
         }
     }
 }

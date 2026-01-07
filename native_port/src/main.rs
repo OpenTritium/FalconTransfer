@@ -50,10 +50,16 @@ async fn main() {
     loop {
         select! {
             cmd_res = native_port.recv().fuse() => {
-                handle_cmd_res(cmd_res, cmd_tx.clone(), &mut watchers).await;
+                if !handle_cmd_res(cmd_res, cmd_tx.clone(), &mut watchers).await {
+                    error!("Command handling failed, exiting event loop");
+                    break;
+                }
             }
             update = watchers.next().fuse() => {
-                handle_watch_event(update, &mut watchers, &mut native_port).await;
+                if !handle_watch_event(update, &mut watchers, &mut native_port).await {
+                    error!("Watch event handling failed, exiting event loop");
+                    break;
+                }
             }
         }
     }

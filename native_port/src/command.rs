@@ -31,9 +31,10 @@ macro_rules! forward_error {
 }
 
 #[instrument(skip(inner_cmd_tx, outer_watchers))]
+#[must_use]
 pub async fn handle_cmd_res(
     cmd_res: io::Result<NativeCommand>, inner_cmd_tx: mpmc::Sender<TaskCommand>, outer_watchers: &mut WatchGroup,
-) {
+) -> bool {
     use NativeCommand::*;
     match cmd_res {
         Ok(Create { ref url }) => {
@@ -43,7 +44,7 @@ pub async fn handle_cmd_res(
                 Ok(meta) => Box::new(meta),
                 Err(err) => {
                     error!(error = %err, %url, "Failed to fetch metadata for new download task");
-                    return;
+                    return false;
                 }
             };
             let default_status = TaskStatus::builder()
@@ -56,15 +57,21 @@ pub async fn handle_cmd_res(
             let cmd = TaskCommand::Create { meta, watch: status_tx.into() };
             if let Err(err) = inner_cmd_tx.send_async(cmd).await {
                 error!(error = %err, %id, "Failed to send create command to dispatcher");
+                return false;
             }
             outer_watchers.push(status_rx);
+            true
         }
         Ok(cc @ ChangeConcurrency { id, concurrency }) => {
             info!(%id, concurrency = %concurrency.get(), "Changing task concurrency");
-            let _ = inner_cmd_tx
+            inner_cmd_tx
                 .send_async(TaskCommand::ChangeConcurrency { id, concurrency })
                 .await
-                .inspect_err(|err| forward_error!(cc, err));
+                .map(|_| true)
+                .unwrap_or_else(|err| {
+                    forward_error!(cc, err);
+                    false
+                })
         }
         Ok(crl @ ChangeRateLimited { id, limit }) => {
             info!(
@@ -72,29 +79,44 @@ pub async fn handle_cmd_res(
                 rate_limit = limit.as_ref().map(|l| l.get()).unwrap_or(0),
                 "Changing task rate limit"
             );
-            let _ = inner_cmd_tx
-                .send_async(TaskCommand::ChangeRateLimited { id, limit })
-                .await
-                .inspect_err(|err| forward_error!(crl, err));
+            inner_cmd_tx.send_async(TaskCommand::ChangeRateLimited { id, limit }).await.map(|_| true).unwrap_or_else(
+                |err| {
+                    forward_error!(crl, err);
+                    false
+                },
+            )
         }
         Ok(p @ Pause { id }) => {
             info!(%id, "Pausing task");
-            let _ = inner_cmd_tx.send_async(TaskCommand::Pause(id)).await.inspect_err(|err| forward_error!(p, err));
+            inner_cmd_tx.send_async(TaskCommand::Pause(id)).await.map(|_| true).unwrap_or_else(|err| {
+                forward_error!(p, err);
+                false
+            })
         }
         Ok(r @ Resume { id }) => {
             info!(%id, "Resuming task");
-            let _ = inner_cmd_tx.send_async(TaskCommand::Resume(id)).await.inspect_err(|err| forward_error!(r, err));
+            inner_cmd_tx.send_async(TaskCommand::Resume(id)).await.map(|_| true).unwrap_or_else(|err| {
+                forward_error!(r, err);
+                false
+            })
         }
         Ok(c @ Cancel { id }) => {
             info!(%id, "Cancelling task");
-            let _ = inner_cmd_tx.send_async(TaskCommand::Cancel(id)).await.inspect_err(|err| forward_error!(c, err));
+            inner_cmd_tx.send_async(TaskCommand::Cancel(id)).await.map(|_| true).unwrap_or_else(|err| {
+                forward_error!(c, err);
+                false
+            })
         }
         Ok(r @ Remove { id }) => {
             info!(%id, "Removing task");
-            let _ = inner_cmd_tx.send_async(TaskCommand::Remove(id)).await.inspect_err(|err| forward_error!(r, err));
+            inner_cmd_tx.send_async(TaskCommand::Remove(id)).await.map(|_| true).unwrap_or_else(|err| {
+                forward_error!(r, err);
+                false
+            })
         }
         Err(err) => {
             error!(error = %err, "Failed to receive command from native port");
+            false
         }
     }
 }
