@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
-    num::{NonZeroU8, NonZeroUsize},
+    num::{NonZeroU64, NonZeroU8, NonZeroUsize},
     path::PathBuf,
     sync::LazyLock,
 };
@@ -26,6 +26,8 @@ pub struct Config {
     pub worker_timeout_mins: NonZeroU8,
     /// Persist broadcast interval (seconds)
     pub persist_broadcast_interval_secs: NonZeroU8,
+    /// Batch debouncing interval for task updates (milliseconds)
+    pub debounce_interval_ms: NonZeroU64,
 }
 
 impl Default for Config {
@@ -38,6 +40,7 @@ impl Default for Config {
             http_block_size: NonZeroUsize::new(0x100_0000).unwrap(), // 32 MiB
             worker_timeout_mins: NonZeroU8::new(3).unwrap(),         // 3 minutes
             persist_broadcast_interval_secs: NonZeroU8::new(5).unwrap(), // 5 seconds
+            debounce_interval_ms: NonZeroU64::new(100).unwrap(),      // 100 milliseconds
         }
     }
 }
@@ -116,6 +119,7 @@ mod tests {
             http_block_size: std::num::NonZeroUsize::new(16 * 1024 * 1024).unwrap(),
             worker_timeout_mins: std::num::NonZeroU8::new(3).unwrap(),
             persist_broadcast_interval_secs: std::num::NonZeroU8::new(5).unwrap(),
+            debounce_interval_ms: std::num::NonZeroU64::new(100).unwrap(),
         }
     }
 
@@ -129,6 +133,7 @@ mod tests {
             http_block_size: NonZeroUsize::new(32 * 1024 * 1024).unwrap(), // 32MB
             worker_timeout_mins: NonZeroU8::new(5).unwrap(),
             persist_broadcast_interval_secs: NonZeroU8::new(10).unwrap(),
+            debounce_interval_ms: NonZeroU64::new(200).unwrap(), // 200 milliseconds
         }
     }
 
@@ -477,6 +482,7 @@ http_block_size = 16777216
             http_block_size: large_usize,
             worker_timeout_mins: max_u8,
             persist_broadcast_interval_secs: NonZeroU8::new(1).unwrap(),
+            debounce_interval_ms: NonZeroU64::new(500).unwrap(), // 500 milliseconds
         };
 
         // 验证字段能正确处理这些值

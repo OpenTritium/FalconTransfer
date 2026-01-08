@@ -10,15 +10,18 @@ mod watchers;
 use crate::{
     command::handle_cmd_res,
     port::native_port,
-    task_info::NativePayload,
-    watchers::{WatchGroup, handle_watch_event},
+    task_info::{NativePayload, TaskInfo},
+    watchers::{WatchGroup, WatcherEvent},
 };
 use async_broadcast as broadcast;
-use compio::runtime::spawn;
+use compio::{runtime::spawn, time::interval};
+use falcon_config::global_config;
+use falcon_identity::task::TaskId;
 use falcon_task_composer::TaskDispatcher;
 use flume as mpmc;
 use futures_util::{FutureExt, select};
-use tracing::{error, info, warn};
+use std::{collections::HashMap, time::Duration};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[compio::main]
@@ -32,6 +35,10 @@ async fn main() {
     std::panic::set_hook(Box::new(tracing_panic::panic_hook));
 
     info!("Initializing native port");
+
+    // Load configuration from centralized config
+    let config = global_config();
+    info!(debounce_interval_ms = config.debounce_interval_ms.get(), "Configuration loaded");
 
     // Split native port into reader and writer so they can be used in separate tasks
     let (mut port_reader, mut port_writer) = native_port();
@@ -67,7 +74,12 @@ async fn main() {
     })
     .detach();
 
-    info!("Starting main event loop");
+    info!("Starting main event loop with batch debouncing");
+    let mut update_buffer = HashMap::new();
+    let debounce_duration = Duration::from_millis(config.debounce_interval_ms.get());
+    let mut tick = interval(debounce_duration);
+    info!(debounce_interval_ms = config.debounce_interval_ms.get(), "Timer created, starting event loop");
+
     loop {
         select! {
             cmd_res = stdin_rx.recv_async().fuse() => {
@@ -84,12 +96,58 @@ async fn main() {
                     }
                 }
             }
-            update = watchers.next().fuse() => {
-                if !handle_watch_event(update, &mut watchers, &mut port_writer).await {
-                    error!("Watch event handling failed, exiting event loop");
-                    break;
-                }
+            event = watchers.next().fuse() => {
+                handle_watcher_event(event, &mut update_buffer, &mut watchers).await;
+            }
+            _ = tick.tick().fuse() => {
+                handle_timer_tick(&mut update_buffer, &mut port_writer).await;
             }
         }
+    }
+}
+
+#[inline]
+async fn handle_watcher_event(
+    event: WatcherEvent, update_buffer: &mut HashMap<TaskId, TaskInfo>, watchers: &mut WatchGroup,
+) {
+    debug!("Received watcher event");
+    match event {
+        WatcherEvent::Updated(task) => {
+            let id = task.id;
+            // Buffer the update for batch sending
+            update_buffer.insert(id, task);
+            // Re-arm the watcher for this task
+            watchers.acknowledge_and_rewatch(id);
+            debug!(%id, buffer_size = update_buffer.len(), "Task update buffered");
+        }
+        WatcherEvent::Removed(task_id) => {
+            debug!(%task_id, "Task removed event received");
+            // Remove from buffer and from the watcher group to prevent continued watching
+            update_buffer.remove(&task_id);
+            watchers.remove(task_id);
+            info!(%task_id, "Task removed and notification sent");
+        }
+    }
+}
+
+#[inline]
+async fn handle_timer_tick(update_buffer: &mut HashMap<TaskId, TaskInfo>, port_writer: &mut port::NativePortWriter) {
+    debug!("Timer tick triggered");
+    // Batch flush: send all buffered updates at once
+    if !update_buffer.is_empty() {
+        debug!(batch_size = update_buffer.len(), "Preparing to send batch updates");
+        // Merge all payloads into a single batch
+        let all_tasks: Vec<_> = update_buffer.values().cloned().collect();
+        debug!(total_tasks = all_tasks.len(), "Merged all tasks into batch");
+
+        if let Err(e) = port_writer.send(NativePayload(all_tasks.into_boxed_slice())).await {
+            error!(error = %e, "Failed to send batch updates");
+            // Note: This doesn't break the main loop as it was in the original code
+            return;
+        }
+        info!(batch_size = update_buffer.len(), "Batch updates sent successfully");
+        update_buffer.clear();
+    } else {
+        debug!("Timer tick but no updates to send");
     }
 }

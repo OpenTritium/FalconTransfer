@@ -1,13 +1,10 @@
-use crate::{
-    port::NativePortWriter,
-    task_info::{NativePayload, TaskInfo, TaskState},
-};
+use crate::task_info::{TaskInfo, TaskState};
 use falcon_identity::task::TaskId;
 use falcon_task_composer::TaskStatus;
 use futures_util::{FutureExt, StreamExt, future::LocalBoxFuture, stream::FuturesUnordered};
 use see::sync::Receiver;
 use std::{collections::HashMap, future::pending};
-use tracing::{debug, error, info, instrument};
+use tracing::debug;
 
 #[derive(Debug, Clone)]
 pub enum WatcherEvent {
@@ -46,10 +43,11 @@ impl WatchGroup {
 
     #[inline]
     pub fn watch(&self, id: TaskId) {
-        let Some(mut rx) = self.watchers.get(&id).cloned() else {
+        let Some(rx) = self.watchers.get(&id) else {
             debug!(%id, "Attempted to watch non-existent task");
             return;
         };
+        let mut rx = rx.clone();
         let fut = async move {
             if rx.changed().await.is_ok() {
                 let status = rx.borrow_and_update();
@@ -62,7 +60,10 @@ impl WatchGroup {
     }
 
     #[inline]
-    pub fn remove(&mut self, id: TaskId) { self.watchers.remove(&id); }
+    pub fn acknowledge_and_rewatch(&mut self, id: TaskId) {
+        self.mark_unchanged(id);
+        self.watch(id);
+    }
 
     pub async fn next(&mut self) -> WatcherEvent {
         if let Some(status) = self.pendings.next().await {
@@ -78,6 +79,9 @@ impl WatchGroup {
         self.watchers.insert(id, rx);
         self.watch(id);
     }
+
+    #[inline]
+    pub fn remove(&mut self, id: TaskId) -> Option<Receiver<TaskStatus>> { self.watchers.remove(&id) }
 }
 
 #[inline]
@@ -103,32 +107,5 @@ fn map_status_to_info(status: &TaskStatus) -> TaskInfo {
         state,
         url: url.clone(),
         path: path.as_ref().map(|p| p.to_string()),
-    }
-}
-
-#[instrument(skip(port))]
-#[must_use]
-pub async fn handle_watch_event(status: WatcherEvent, watchers: &mut WatchGroup, port: &mut NativePortWriter) -> bool {
-    match status {
-        WatcherEvent::Updated(task) => {
-            let id = task.id;
-            let res = port
-                .send(NativePayload(Box::new([task])))
-                .await
-                .inspect_err(|err| error!(error = %err, %id, "Failed to send task update to native port"));
-            if res.is_ok() {
-                debug!(%id, "Task info update sent successfully");
-                watchers.mark_unchanged(id);
-                watchers.watch(id);
-                true
-            } else {
-                false
-            }
-        }
-        WatcherEvent::Removed(task_id) => {
-            info!(%task_id, "Task removed, cleaning up watcher");
-            watchers.remove(task_id);
-            true
-        }
     }
 }
