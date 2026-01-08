@@ -43,8 +43,9 @@ pub async fn handle_cmd_res(
             let meta = match fetch_meta(url).await {
                 Ok(meta) => Box::new(meta),
                 Err(err) => {
+                    // Non-fatal error: log and continue, don't exit the process
                     error!(error = %err, %url, "Failed to fetch metadata for new download task");
-                    return false;
+                    return true;
                 }
             };
             let default_status = TaskStatus::builder()

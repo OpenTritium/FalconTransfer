@@ -1,5 +1,5 @@
 use crate::{
-    port::NativePort,
+    port::NativePortWriter,
     task_info::{NativePayload, TaskInfo, TaskState},
 };
 use falcon_identity::task::TaskId;
@@ -108,7 +108,7 @@ fn map_status_to_info(status: &TaskStatus) -> TaskInfo {
 
 #[instrument(skip(port))]
 #[must_use]
-pub async fn handle_watch_event(status: WatcherEvent, watchers: &mut WatchGroup, port: &mut NativePort) -> bool {
+pub async fn handle_watch_event(status: WatcherEvent, watchers: &mut WatchGroup, port: &mut NativePortWriter) -> bool {
     match status {
         WatcherEvent::Updated(task) => {
             let id = task.id;

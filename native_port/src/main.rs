@@ -9,7 +9,7 @@ mod watchers;
 
 use crate::{
     command::handle_cmd_res,
-    port::NativePort,
+    port::native_port,
     task_info::NativePayload,
     watchers::{WatchGroup, handle_watch_event},
 };
@@ -33,7 +33,9 @@ async fn main() {
 
     info!("Initializing native port");
 
-    let mut native_port = NativePort::new();
+    // Split native port into reader and writer so they can be used in separate tasks
+    let (mut port_reader, mut port_writer) = native_port();
+
     let (cmd_tx, cmd_rx) = mpmc::unbounded();
     // todo 条件编译 qos
     let (_qos_tx, qos_rx) = broadcast::broadcast(1);
@@ -44,20 +46,46 @@ async fn main() {
     let snapshot = watchers.snapshot_all().await;
     // todo 等待持久化状态恢复
     info!(task_count = snapshot.len(), "Sending initial task snapshot to native port");
-    if let Err(err) = native_port.send(NativePayload(snapshot)).await {
+    if let Err(err) = port_writer.send(NativePayload(snapshot)).await {
         error!(error = %err, "Failed to send initial task snapshot");
     }
+
+    // Create a channel for commands read from stdin
+    // This avoids the select! drop issue by having recv() run in a dedicated task
+    let (stdin_tx, stdin_rx) = mpmc::unbounded();
+
+    // Spawn a dedicated task for reading from stdin
+    // This task owns the recv() operation and won't be interrupted by select!
+    spawn(async move {
+        loop {
+            let cmd_res = port_reader.recv().await;
+            if stdin_tx.send_async(cmd_res).await.is_err() {
+                warn!("stdin channel broken")
+                break; // Channel closed, exit
+            }
+        }
+    })
+    .detach();
+
     info!("Starting main event loop");
     loop {
         select! {
-            cmd_res = native_port.recv().fuse() => {
-                if !handle_cmd_res(cmd_res, cmd_tx.clone(), &mut watchers).await {
-                    error!("Command handling failed, exiting event loop");
-                    break;
+            cmd_res = stdin_rx.recv_async().fuse() => {
+                match cmd_res {
+                    Ok(res) => {
+                        if !handle_cmd_res(res, cmd_tx.clone(), &mut watchers).await {
+                            error!("Command handling failed, exiting event loop");
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        error!("Stdin reader task closed");
+                        break;
+                    }
                 }
             }
             update = watchers.next().fuse() => {
-                if !handle_watch_event(update, &mut watchers, &mut native_port).await {
+                if !handle_watch_event(update, &mut watchers, &mut port_writer).await {
                     error!("Watch event handling failed, exiting event loop");
                     break;
                 }
