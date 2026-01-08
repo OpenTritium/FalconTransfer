@@ -26,12 +26,29 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 
 #[compio::main]
 async fn main() {
+    // 确保日志目录存在
+    std::fs::create_dir_all("logs").expect("Failed to create logs directory");
+
     let log = tracing_appender::rolling::daily("logs", "claw.log");
     let (writer, _guard) = tracing_appender::non_blocking(log);
     let file_layer = fmt::layer().with_writer(writer).json();
-    // Enable debug logging for development
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
-    tracing_subscriber::registry().with(filter).with(file_layer).init();
+
+    // 控制台输出，便于实时查看
+    // 注意：必须输出到 stderr，因为 stdout 用于协议通信
+    let console_layer = fmt::layer().with_writer(std::io::stderr);
+
+    // 默认使用 info 级别，只记录关键信息
+    // 可以通过环境变量 RUST_LOG 覆盖，例如:
+    //   RUST_LOG=warn uv run dev   (只记录警告和错误)
+    //   RUST_LOG=debug uv run dev  (调试详情，会产生大量日志)
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(file_layer)
+        .with(console_layer)
+        .init();
     std::panic::set_hook(Box::new(tracing_panic::panic_hook));
 
     info!("Initializing native port");
@@ -110,24 +127,26 @@ async fn main() {
 async fn handle_watcher_event(
     event: WatcherEvent, update_buffer: &mut HashMap<TaskId, TaskInfo>, watchers: &mut WatchGroup,
 ) {
-    debug!("Received watcher event");
+    info!("Received watcher event");
     match event {
         WatcherEvent::Updated(task) => {
             let id = task.id;
+            info!(%id, "WatcherEvent::Updated, inserting to buffer and re-watching");
             // Buffer the update for batch sending
             update_buffer.insert(id, task);
             // Re-arm the watcher for this task
             watchers.acknowledge_and_rewatch(id);
-            debug!(%id, buffer_size = update_buffer.len(), "Task update buffered");
+            info!(%id, buffer_size = update_buffer.len(), "Task update buffered and watcher re-armed");
         }
         WatcherEvent::Removed(task_id) => {
-            debug!(%task_id, "Task removed event received");
+            warn!(%task_id, "Task removed event received");
             // Remove from buffer and from the watcher group to prevent continued watching
             update_buffer.remove(&task_id);
             watchers.remove(task_id);
             info!(%task_id, "Task removed and notification sent");
         }
     }
+    info!("handle_watcher_event completed");
 }
 
 #[inline]

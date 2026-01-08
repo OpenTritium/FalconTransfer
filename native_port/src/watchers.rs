@@ -42,21 +42,32 @@ impl WatchGroup {
     }
 
     #[inline]
-    pub fn watch(&self, id: TaskId) {
+    pub fn watch(&mut self, id: TaskId) {
         let Some(rx) = self.watchers.get(&id) else {
-            debug!(%id, "Attempted to watch non-existent task");
+            tracing::warn!(%id, "Attempted to watch non-existent task");
             return;
         };
         let mut rx = rx.clone();
+        tracing::info!(%id, pendings_count = self.pendings.len(), "Creating new watcher future");
         let fut = async move {
-            if rx.changed().await.is_ok() {
-                let status = rx.borrow_and_update();
-                WatcherEvent::Updated(map_status_to_info(status.as_ref()))
-            } else {
-                WatcherEvent::Removed(id)
+            tracing::info!(%id, "Waiting for rx.changed()...");
+            match rx.changed().await {
+                Ok(_) => {
+                    let status = rx.borrow_and_update();
+                    tracing::info!(%id, "rx.changed() completed, status updated");
+                    WatcherEvent::Updated(map_status_to_info(status.as_ref()))
+                }
+                Err(_) => {
+                    tracing::error!(%id, "rx.changed() FAILED - channel closed unexpectedly!");
+                    WatcherEvent::Removed(id)
+                }
             }
         };
-        self.pendings.push(fut.boxed_local());
+        tracing::info!(%id, "About to call boxed_local()");
+        let boxed = fut.boxed_local();
+        tracing::info!(%id, "boxed_local() completed, about to push");
+        self.pendings.push(boxed);
+        tracing::info!(pendings_count = self.pendings.len(), "Future pushed to pendings");
     }
 
     #[inline]
@@ -66,16 +77,22 @@ impl WatchGroup {
     }
 
     pub async fn next(&mut self) -> WatcherEvent {
-        if let Some(status) = self.pendings.next().await {
+        tracing::info!(pendings_count = self.pendings.len(), "Waiting for next watcher event");
+        let event = if let Some(status) = self.pendings.next().await {
+            tracing::info!(pendings_count = self.pendings.len(), "Got watcher event");
             status
         } else {
+            tracing::error!("No pending futures, will wait forever (pending())");
             pending().await
-        }
+        };
+        tracing::info!("next() returning event");
+        event
     }
 
     #[inline]
     pub fn push(&mut self, rx: Receiver<TaskStatus>) {
         let id = rx.borrow().id;
+        tracing::info!(%id, "Adding new watcher to group");
         self.watchers.insert(id, rx);
         self.watch(id);
     }
