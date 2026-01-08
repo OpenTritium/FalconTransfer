@@ -18,7 +18,7 @@ use compio::runtime::spawn;
 use falcon_task_composer::TaskDispatcher;
 use flume as mpmc;
 use futures_util::{FutureExt, select};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[compio::main]
@@ -60,7 +60,7 @@ async fn main() {
         loop {
             let cmd_res = port_reader.recv().await;
             if stdin_tx.send_async(cmd_res).await.is_err() {
-                warn!("stdin channel broken")
+                warn!("stdin channel broken");
                 break; // Channel closed, exit
             }
         }
