@@ -4,7 +4,7 @@ use camino::Utf8PathBuf;
 use falcon_identity::task::TaskId;
 use serde::{Deserialize, Serialize};
 use sparse_ranges::RangeSet;
-use std::fmt;
+use std::{fmt, sync::Arc};
 use typed_builder::TypedBuilder;
 use ubyte::ByteUnit;
 use url::Url;
@@ -35,7 +35,7 @@ macro_rules! impl_state_setter {
 }
 
 /// Task status tracking download progress and state.
-#[derive(Debug, TypedBuilder)]
+#[derive(Debug, TypedBuilder, Clone)]
 pub struct TaskStatus {
     #[builder(default)]
     pub id: TaskId,
@@ -53,7 +53,7 @@ pub struct TaskStatus {
     #[builder(default)]
     pub state: TaskStateDesc,
     #[builder(default)]
-    pub err: Option<WorkerError>,
+    pub err: Option<Arc<WorkerError>>,
     /// Download URL (update after redirect)
     pub url: Url,
     /// Local file path (None if file creation failed)
@@ -68,7 +68,7 @@ impl TaskStatus {
 
     /// Sets error for this task.
     #[inline]
-    pub fn set_err(&mut self, err: WorkerError) { self.err = Some(err); }
+    pub fn set_err(&mut self, err: WorkerError) { self.err = Some(err.into()); }
 }
 
 /// Task state description.

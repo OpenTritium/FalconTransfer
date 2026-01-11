@@ -1,128 +1,148 @@
-use crate::task_info::{TaskInfo, TaskState};
-use falcon_identity::task::TaskId;
-use falcon_task_composer::TaskStatus;
-use futures_util::{FutureExt, StreamExt, future::LocalBoxFuture, stream::FuturesUnordered};
-use see::sync::Receiver;
-use std::{collections::HashMap, future::pending};
-use tracing::debug;
+use futures_util::{
+    Stream, StreamExt,
+    future::{BoxFuture, FutureExt},
+    stream::{AbortHandle, Abortable, FuturesUnordered},
+};
+use std::{
+    collections::HashMap,
+    hash::Hash,
+    pin::Pin,
+    task::{Context, Poll},
+};
+use tokio_stream::StreamMap;
 
-#[derive(Debug, Clone)]
-pub enum WatcherEvent {
-    Updated(TaskInfo),
-    Removed(TaskId),
+// 1. 定义内部具体的流类型
+// 关键点：必须是 Pin<Box<...>>，这样它才实现了 Stream trait
+type PinnedStream<V> = Pin<Box<dyn Stream<Item = V> + Send>>;
+
+// 2. 定义我们在任务间传递的流包装器
+// Abortable<T> 本身也是 Unpin 的（只要 T 是 Unpin 的），所以不需要再包一层 Pin<Box>
+type RecyclableStream<V> = Abortable<PinnedStream<V>>;
+
+// 3. Future 的返回结果：Key, Value, 和归还的流
+type RecycleResult<K, V> = (K, Option<V>, RecyclableStream<V>);
+
+pub struct WatchGroup<K, V> {
+    // 存放 "等待下一个值" 的 Future
+    tasks: FuturesUnordered<BoxFuture<'static, RecycleResult<K, V>>>,
+
+    // 仅用于触发 Abort，不持有流的所有权
+    handles: HashMap<K, AbortHandle>,
 }
 
-#[derive(Debug)]
-pub struct WatchGroup {
-    watchers: HashMap<TaskId, Receiver<TaskStatus>>,
-    pendings: FuturesUnordered<LocalBoxFuture<'static, WatcherEvent>>,
-}
+impl<K, V> WatchGroup<K, V>
+where
+    K: Hash + Eq + Clone + Send + 'static,
+    V: Send + 'static,
+{
+    pub fn new() -> Self { Self { tasks: FuturesUnordered::new(), handles: HashMap::new() } }
 
-impl FromIterator<(TaskId, Receiver<TaskStatus>)> for WatchGroup {
-    fn from_iter<T: IntoIterator<Item = (TaskId, Receiver<TaskStatus>)>>(iter: T) -> Self {
-        let watchers = iter.into_iter().collect();
-        Self { watchers, pendings: FuturesUnordered::new() }
+    pub fn push_stream<S>(&mut self, id: K, stream: S)
+    where
+        S: Stream<Item = V> + Send + 'static,
+    {
+        // 1. 清理旧流
+        self.remove(&id);
+
+        // 2. 创建 Abort 控制器
+        let (handle, reg) = AbortHandle::new_pair();
+
+        // 3. 构造流对象
+        // 关键修复：使用 Box::pin 而不是 Box::new
+        // 这样 PinnedStream 实现了 Stream，Abortable 也就自动实现了 Stream
+        let pinned_stream: PinnedStream<V> = Box::pin(stream);
+        let abortable_stream = Abortable::new(pinned_stream, reg);
+
+        self.handles.insert(id.clone(), handle);
+
+        // 4. 启动第一个任务
+        self.tasks.push(Self::make_future(id, abortable_stream));
     }
-}
 
-impl WatchGroup {
-    pub fn new() -> Self { Self { watchers: HashMap::new(), pendings: FuturesUnordered::new() } }
-
-    pub async fn snapshot_all(&mut self) -> Box<[TaskInfo]> {
-        self.watchers.iter_mut().map(|(_, rx)| map_status_to_info(rx.borrow_and_update().as_ref())).collect()
-    }
-
-    #[inline]
-    pub fn mark_unchanged(&mut self, id: TaskId) {
-        if let Some(rx) = self.watchers.get_mut(&id) {
-            rx.mark_unchanged();
-        } else {
-            debug!(%id, "Attempted to mark non-existent watcher as unchanged");
+    pub fn remove(&mut self, id: &K) {
+        if let Some(handle) = self.handles.remove(id) {
+            handle.abort();
         }
     }
 
     #[inline]
-    pub fn watch(&mut self, id: TaskId) {
-        let Some(rx) = self.watchers.get(&id) else {
-            tracing::warn!(%id, "Attempted to watch non-existent task");
-            return;
-        };
-        let mut rx = rx.clone();
-        tracing::info!(%id, pendings_count = self.pendings.len(), "Creating new watcher future");
-        let fut = async move {
-            tracing::info!(%id, "Waiting for rx.changed()...");
-            match rx.changed().await {
-                Ok(_) => {
-                    let status = rx.borrow_and_update();
-                    tracing::info!(%id, "rx.changed() completed, status updated");
-                    WatcherEvent::Updated(map_status_to_info(status.as_ref()))
-                }
-                Err(_) => {
-                    tracing::error!(%id, "rx.changed() FAILED - channel closed unexpectedly!");
-                    WatcherEvent::Removed(id)
-                }
-            }
-        };
-        tracing::info!(%id, "About to call boxed_local()");
-        let boxed = fut.boxed_local();
-        tracing::info!(%id, "boxed_local() completed, about to push");
-        self.pendings.push(boxed);
-        tracing::info!(pendings_count = self.pendings.len(), "Future pushed to pendings");
+    fn make_future(key: K, mut stream: RecyclableStream<V>) -> BoxFuture<'static, RecycleResult<K, V>> {
+        // Box::pin 也就是 boxed()，生成 BoxFuture
+        async move {
+            // 这里能调用 next() 是因为：
+            // 1. RecyclableStream 是 Abortable<Pin<Box<...>>>
+            // 2. Pin<Box<...>> 实现了 Stream 且是 Unpin
+            // 3. 所以 Abortable 实现了 Stream 且是 Unpin
+            // 4. StreamExt::next() 需要 &mut Self (where Self: Unpin)，满足条件
+            let val = stream.next().await;
+            (key, val, stream)
+        }
+        .boxed()
     }
-
-    #[inline]
-    pub fn acknowledge_and_rewatch(&mut self, id: TaskId) {
-        self.mark_unchanged(id);
-        self.watch(id);
-    }
-
-    pub async fn next(&mut self) -> WatcherEvent {
-        tracing::info!(pendings_count = self.pendings.len(), "Waiting for next watcher event");
-        let event = if let Some(status) = self.pendings.next().await {
-            tracing::info!(pendings_count = self.pendings.len(), "Got watcher event");
-            status
-        } else {
-            tracing::error!("No pending futures, will wait forever (pending())");
-            pending().await
-        };
-        tracing::info!("next() returning event");
-        event
-    }
-
-    #[inline]
-    pub fn push(&mut self, rx: Receiver<TaskStatus>) {
-        let id = rx.borrow().id;
-        tracing::info!(%id, "Adding new watcher to group");
-        self.watchers.insert(id, rx);
-        self.watch(id);
-    }
-
-    #[inline]
-    pub fn remove(&mut self, id: TaskId) -> Option<Receiver<TaskStatus>> { self.watchers.remove(&id) }
 }
 
-#[inline]
-fn map_status_to_info(status: &TaskStatus) -> TaskInfo {
-    use falcon_task_composer::TaskStateDesc::*;
-    let TaskStatus { id, total, buffered, state, url, path, err, name, .. } = status;
-    let downloaded = buffered.len();
-    let state = match state {
-        Idle => TaskState::Idle,
-        Running => TaskState::Running { downloaded },
-        Paused => TaskState::Paused { downloaded },
-        Completed => TaskState::Completed,
-        Cancelled => TaskState::Cancelled,
-        Failed => TaskState::Failed {
-            last_error: err.as_ref().map(|err| err.to_string()).unwrap_or_else(|| "Unknown error".to_string()),
-            downloaded,
-        },
-    };
-    TaskInfo {
-        id: *id,
-        name: name.clone(),
-        size: *total,
-        state,
-        url: url.clone(),
-        path: path.as_ref().map(|p| p.to_string()),
+impl<K, V> Stream for WatchGroup<K, V>
+where
+    K: Hash + Eq + Clone + Send + 'static,
+    V: Send + 'static,
+    Self: Unpin,
+{
+    type Item = (K, V);
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            if self.tasks.is_empty() {
+                return Poll::Pending;
+            }
+
+            match self.tasks.poll_next_unpin(cx) {
+                Poll::Ready(Some((key, val, stream))) => {
+                    match val {
+                        Some(v) => {
+                            // 流还有数据，制造下一个 Future 放回队列
+                            self.tasks.push(Self::make_future(key.clone(), stream));
+                            return Poll::Ready(Some((key, v)));
+                        }
+                        None => {
+                            // 流结束或被 Abort，清理 handle 并继续轮询其他流
+                            self.handles.remove(&key);
+                            continue;
+                        }
+                    }
+                }
+                Poll::Ready(None) => return Poll::Pending,
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+// ----------------------
+// Tests
+// ----------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+    use tokio_stream::wrappers::UnboundedReceiverStream;
+
+    #[tokio::test]
+    async fn test_high_perf_streams() {
+        let mut wg = WatchGroup::<String, i32>::new();
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        wg.push_stream("k1".to_string(), UnboundedReceiverStream::new(rx));
+
+        tx.send(1).unwrap();
+        let (k, v) = wg.next().await.unwrap();
+        assert_eq!(k, "k1");
+        assert_eq!(v, 1);
+
+        // 测试 Abort
+        wg.remove(&"k1".to_string());
+        tx.send(2).unwrap();
+
+        // 应该拿不到数据了
+        let res = tokio::time::timeout(std::time::Duration::from_millis(10), wg.next()).await;
+        assert!(res.is_err());
     }
 }

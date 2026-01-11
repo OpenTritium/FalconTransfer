@@ -84,23 +84,10 @@ impl AsyncWrite for SeqBufFile {
         // The previous flush may error because disk full. We need to make the buffer all-done before writing new data
         // to it.
         let pos = self.file.position() as usize + self.buf.remaining_len();
-        debug!(
-            cursor_pos = self.file.position() as usize,
-            buf_remaining = self.buf.remaining_len(),
-            calculated_pos = pos,
-            flush_range = self.flushed.len(),
-            "SeqBufFile: calculating write position"
-        );
         let buf_len = buf.buf_len();
         (_, buf) = buf_try!(self.flush_if_needed(buf_len.into()).await, buf);
         let written = self.buf.read_from(buf.as_slice());
         self.buffered.insert_n_at(written, pos);
-        trace!(
-            written,
-            insert_pos = pos,
-            new_buffered = ?self.buffered,
-            "SeqBufFile: data written to buffer"
-        );
         (_, buf) = buf_try!(self.flush_if_needed(None).await, buf);
         (Ok(written), buf).into()
     }
@@ -113,17 +100,7 @@ impl AsyncWrite for SeqBufFile {
     /// - Updates `flushed` range to match `buffered` range
     async fn flush(&mut self) -> io::Result<()> {
         let Self { file, buf, .. } = self;
-        trace!(
-            before_buffered = ?self.buffered,
-            before_flushed = ?self.flushed,
-            buf_remaining_len = buf.remaining_len(),
-            "SeqBufFile: before flush"
-        );
         buf.flush_to(file).await?;
-        debug!(
-            after_flushed = ?self.buffered,
-            "SeqBufFile: after flush"
-        );
         self.flushed = self.buffered.clone();
         Ok(())
     }

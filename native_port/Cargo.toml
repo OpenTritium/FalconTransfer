@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+compio_debouncer = { git = "https://github.com/OpenTritium/compio_debouncer.git", branch = "main" }
 async-broadcast = { workspace = true }
 compio = { workspace = true }
 falcon_identity = { path = "../identity" }
@@ -14,8 +15,16 @@ futures-util = { workspace = true }
 see = { workspace = true }
 serde = { workspace = true }
 serde_json = "1.0.145"
+coarsetime = { workspace = true }
 tracing = { workspace = true }
 tracing-appender = { workspace = true }
 tracing-panic = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }
+anyhow = { workspace = true }
+event-listener = "5.4.1"
+tokio-stream = { version = "0.1.18", default-features = false }
+
+[dev-dependencies]
+tokio = { version = "1.49.0", features = ["full"] }
+tokio-stream = "0.1.18"

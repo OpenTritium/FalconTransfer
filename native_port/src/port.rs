@@ -4,26 +4,24 @@ use compio::{
     io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter},
 };
 use std::{io, mem::size_of};
+use tracing::trace;
 
 type MsgLen = u32;
 
 const MAX_COMMAND_SIZE: usize = 1024 * 1024;
 
-/// Reader half of the native port (stdin)
 pub struct NativePortReader {
-    rx: BufReader<Stdin>,
+    rx: Stdin,
 }
 
-/// Writer half of the native port (stdout)
 pub struct NativePortWriter {
-    tx: BufWriter<Stdout>,
+    tx: Stdout,
 }
 
-/// Create a new native port reader/writer pair
 pub fn native_port() -> (NativePortReader, NativePortWriter) {
-    let reader = NativePortReader { rx: BufReader::new(stdin()) };
-    let writer = NativePortWriter { tx: BufWriter::new(stdout()) };
-    (reader, writer)
+    let rx = NativePortReader { rx: stdin() };
+    let tx = NativePortWriter { tx: stdout() };
+    (rx, tx)
 }
 
 impl NativePortReader {
@@ -31,26 +29,35 @@ impl NativePortReader {
         let msg_len_info = [0u8; size_of::<MsgLen>()];
         let (_, msg_len_info) = self.rx.read_exact(msg_len_info).await?;
         let msg_len = MsgLen::from_ne_bytes(msg_len_info) as usize;
+        trace!("Received message length: {msg_len} bytes");
         if msg_len > MAX_COMMAND_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Message size {msg_len} exceeds maximum {MAX_COMMAND_SIZE}"),
             ));
         }
-
         let buf = vec![0u8; msg_len];
         let (_, buf) = self.rx.read_exact(buf).await?;
-        serde_json::from_slice(&buf).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
+        let cmd: NativeCommand =
+            serde_json::from_slice(&buf).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+        trace!("Received command: {cmd:?}");
+        Ok(cmd)
     }
 }
 
 impl NativePortWriter {
     pub async fn send(&mut self, payload: NativePayload) -> io::Result<()> {
-        let msg_json = serde_json::to_string(&payload)
+        const HEADER_LEN: usize = size_of::<MsgLen>();
+        let mut buf = Vec::with_capacity(1024);
+        buf.extend_from_slice(&[0u8; HEADER_LEN]);
+        serde_json::to_writer(&mut buf, &payload)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-        let msg_len = msg_json.len() as MsgLen;
-        self.tx.write_all(msg_len.to_ne_bytes()).await?;
-        self.tx.write_all(msg_json.into_bytes()).await?;
-        self.tx.flush().await
+        let msg_len = (buf.len() - HEADER_LEN) as MsgLen;
+        let len_bytes = msg_len.to_ne_bytes();
+        buf[0..HEADER_LEN].copy_from_slice(&len_bytes);
+        trace!("Sending payload: {msg_len} bytes");
+        self.tx.write_all(buf).await?;
+        trace!("Payload sent successfully");
+        Ok(())
     }
 }
