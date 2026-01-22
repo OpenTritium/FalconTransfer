@@ -1,20 +1,16 @@
 use crate::task_info::TaskInfo;
-use compio_debouncer::Debouncer;
-use falcon_config::global_config;
+// use compio_debouncer::Debouncer;
+// use falcon_config::global_config;
 use falcon_identity::task::TaskId;
 use falcon_task_composer::{TaskCommand, TaskStatus, fetch_meta};
 use flume as mpmc;
 use futures_util::{
-    Stream, StreamExt,
-    stream::{BoxStream, LocalBoxStream},
+    StreamExt,
+    stream::LocalBoxStream,
 };
 use see::sync as watch;
 use serde::Deserialize;
-use std::{
-    num::{NonZeroU8, NonZeroU32},
-    pin::Pin,
-    time::Duration,
-};
+use std::num::{NonZeroU8, NonZeroU32};
 use tokio_stream::StreamMap;
 use tracing::{debug, error, info};
 use url::Url;
@@ -75,13 +71,14 @@ pub async fn handle_native_cmd(
             dest.send_async(TaskCommand::Create { meta: meta.into(), watch: tx.into() }).await?;
             info!("Start watching Task[{id}]");
             let rx = rx.into_stream();
-            let rx = Debouncer::new(rx, Duration::from_millis(global_config().nativeport_debounce_ms.get()));
+            // let rx = Debouncer::new(rx, Duration::from_millis(global_config().nativeport_debounce_ms.get()));
             let rx = rx.map(TaskInfo::from);
             watchers.insert(id, rx.boxed_local());
             info!("Add Task[{id}] to watchers (now tracking {} tasks)", watchers.len());
         }
         Remove { id } => {
             watchers.remove(&id);
+            dest.send_async(TaskCommand::Remove(id)).await?;
             info!("Remove Task[{id}] from watchers (now tracking {} tasks)", watchers.len());
         }
     }

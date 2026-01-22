@@ -42,7 +42,7 @@ impl Default for Config {
             http_block_size: NonZeroUsize::new(0x100_0000).unwrap(), // 32 MiB
             worker_timeout_mins: NonZeroU8::new(3).unwrap(),         // 3 minutes
             persist_broadcast_interval_secs: NonZeroU8::new(5).unwrap(), // 5 seconds
-            nativeport_debounce_ms: NonZeroU64::new(1000).unwrap(),
+            nativeport_debounce_ms: NonZeroU64::new(300).unwrap(),
             log_dir: "logs".into(),
         }
     }

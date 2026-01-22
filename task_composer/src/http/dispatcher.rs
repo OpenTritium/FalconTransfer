@@ -437,6 +437,13 @@ impl TaskDispatcher {
             Ok(Pause(ref id)) => {
                 self.pendings.insert(*id);
                 if let Some(task) = self.tasks.get_mut(id) {
+                    use TaskStateDesc::*;
+                    let state = task.status.borrow().state;
+                    if matches!(state, Completed | Failed | Cancelled) {
+                        warn!(task_id = %id, state = %state, "Cannot pause a task in terminal state");
+                        return true;
+                    }
+
                     task.cancel.cancel();
                     // Reset concurrency counter immediately since workers are being cancelled
                     task.current_concurrency = 0;
@@ -539,10 +546,10 @@ impl TaskDispatcher {
                     .map(|task| {
                         debug_assert!(task.file.is_none(), "File handle should be released before removal");
                         let state = task.status.borrow().state;
-                        !matches!(state, Running | Paused)
+                        !matches!(state, Running)
                     })
                     .unwrap_or(false);
-                // Cannot remove running or paused tasks, must cancel or wait for completion
+                // Cannot remove running tasks, must cancel or wait for completion
                 if couldbe_remove {
                     self.tasks.remove(id);
                     self.pendings.remove(id);
@@ -550,7 +557,7 @@ impl TaskDispatcher {
                     self.broadcast_now();
                     return true;
                 }
-                warn!(task_id = %id, "Cannot remove task that is running or paused");
+                warn!(task_id = %id, "Cannot remove task that is running");
             }
             // Create new task: assign unique file path, open file, spawn workers
             Ok(Create { box meta, box watch }) => {

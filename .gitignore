@@ -2,4 +2,4 @@
 FalconTransferTests
 logs/
 *.log
-.claude
+.claude/
