@@ -10,6 +10,7 @@ compio = { workspace = true }
 falcon_identity = { path = "../identity" }
 falcon_config = { path = "../config" }
 falcon_task_composer = { path = "../task_composer" }
+falcon_persist = { path = "../persist" }
 flume = { workspace = true }
 futures-util = { workspace = true }
 see = { workspace = true }
