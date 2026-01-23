@@ -267,12 +267,6 @@ impl Worker {
             if let BufResult(Err(e), _) = file.write_all(body).await {
                 cleanup_then_fail!(file, &self.status, self.id, File(e), Some(assigned.into()));
             }
-            debug!(
-                task_id = %self.id,
-                buffered = ?file.buffered_range(),
-                flushed = ?file.flushed_range(),
-                "Data written to buffer"
-            );
             Self::update_progress(&self.status, file.buffered_range(), file.flushed_range());
         }
         if let Err(e) = file.shutdown().await {
@@ -392,15 +386,6 @@ impl Worker {
                     cleanup_then_fail!(file, &self.status, self.id, e.into(), Some(assigned.clone().into()));
                 }
                 cur += payload_len;
-                debug!(
-                    task_id = %self.id,
-                    part_range = ?part_assigned,
-                    write_offset = cur - payload_len,
-                    payload_len = payload_len,
-                    buffered = ?file.buffered_range(),
-                    flushed = ?file.flushed_range(),
-                    "Multipart part data written"
-                );
                 Self::update_progress(&self.status, file.buffered_range(), file.flushed_range());
             }
         }

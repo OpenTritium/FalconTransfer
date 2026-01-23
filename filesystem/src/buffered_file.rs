@@ -198,7 +198,7 @@ impl RandBufFile {
         );
         vbuf.flush_to(file).await?;
         self.vbuf.release_done();
-        debug!(
+        trace!(
             after_flushed = ?self.buffered,
             "RandBufFile: after flush"
         );
@@ -235,7 +235,7 @@ impl AsyncWriteAt for RandBufFile {
         );
         let written = self.vbuf.read_from_at(buf.as_slice(), pos);
         self.buffered.insert_n_at(written, pos);
-        debug!(
+        trace!(
             written,
             insert_pos = pos,
             new_buffered = ?self.buffered,

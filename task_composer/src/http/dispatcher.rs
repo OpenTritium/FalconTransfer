@@ -35,7 +35,7 @@ use std::{
     ops::Not,
     rc::Rc,
 };
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 use typed_builder::TypedBuilder;
 
 pub type JoinResult<T> = Result<T, Box<dyn Any + Send>>;
@@ -136,11 +136,11 @@ impl TaskDispatcher {
     #[inline]
     fn broadcast_now(&mut self) {
         let Some(persist_tasks) = &mut self.persist_tasks else {
-            debug!("Persist tasks broadcast not initialized, skipping broadcast");
+            trace!("Persist tasks broadcast not initialized, skipping broadcast");
             return;
         };
         let Some(persist_pendings) = &mut self.persist_pendings else {
-            debug!("Persist pendings broadcast not initialized, skipping broadcast");
+            trace!("Persist pendings broadcast not initialized, skipping broadcast");
             return;
         };
 
@@ -544,9 +544,8 @@ impl TaskDispatcher {
                     .tasks
                     .get(id)
                     .map(|task| {
-                        debug_assert!(task.file.is_none(), "File handle should be released before removal");
                         let state = task.status.borrow().state;
-                        !matches!(state, Running)
+                        matches!(state, Cancelled)
                     })
                     .unwrap_or(false);
                 // Cannot remove running tasks, must cancel or wait for completion
