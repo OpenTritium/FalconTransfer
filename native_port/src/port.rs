@@ -1,65 +1,63 @@
 use crate::{command::NativeCommand, task_info::NativePayload};
 use compio::{
     fs::{Stdin, Stdout, stdin, stdout},
-    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter},
+    io::{AsyncReadExt, AsyncWriteExt},
 };
 use std::{io, mem::size_of};
-use tracing::{debug, error, instrument};
+use tracing::trace;
 
 type MsgLen = u32;
 
-const MAX_MESSAGE_SIZE: usize = 100 * 1024 * 1024; // 100MB
+const MAX_COMMAND_SIZE: usize = 1024 * 1024;
 
-pub struct NativePort {
+pub struct NativePortReader {
     rx: Stdin,
-    tx: BufWriter<Stdout>,
 }
 
-impl NativePort {
-    #[inline]
-    pub fn new() -> Self {
-        let tx = BufWriter::new(stdout());
-        let rx = stdin();
-        Self { rx, tx }
-    }
+pub struct NativePortWriter {
+    tx: Stdout,
+}
 
-    #[instrument(skip(self))]
+pub fn native_port() -> (NativePortReader, NativePortWriter) {
+    let rx = NativePortReader { rx: stdin() };
+    let tx = NativePortWriter { tx: stdout() };
+    (rx, tx)
+}
+
+impl NativePortReader {
     pub async fn recv(&mut self) -> io::Result<NativeCommand> {
         let msg_len_info = [0u8; size_of::<MsgLen>()];
         let (_, msg_len_info) = self.rx.read_exact(msg_len_info).await?;
         let msg_len = MsgLen::from_ne_bytes(msg_len_info) as usize;
-
-        debug!(msg_len, "Receiving message from native port");
-
-        if msg_len > MAX_MESSAGE_SIZE {
-            error!(msg_len, max_size = MAX_MESSAGE_SIZE, "Message size exceeds maximum allowed limit");
+        trace!("Received message length: {msg_len} bytes");
+        if msg_len > MAX_COMMAND_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Message size {msg_len} exceeds maximum allowed size {MAX_MESSAGE_SIZE}"),
+                format!("Message size {msg_len} exceeds maximum {MAX_COMMAND_SIZE}"),
             ));
         }
-
         let buf = vec![0u8; msg_len];
         let (_, buf) = self.rx.read_exact(buf).await?;
-        serde_json::from_slice(&buf).map_err(|err| {
-            error!(error = %err, msg_len, "Failed to deserialize command from native port");
-            io::Error::new(io::ErrorKind::InvalidData, format!("Failed to parse message from slice: {err}"))
-        })
+        let cmd: NativeCommand =
+            serde_json::from_slice(&buf).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+        trace!("Received command: {cmd:?}");
+        Ok(cmd)
     }
+}
 
-    #[instrument(skip(self, payload))]
+impl NativePortWriter {
     pub async fn send(&mut self, payload: NativePayload) -> io::Result<()> {
-        let task_count = payload.0.len();
-        let msg_json = serde_json::to_string(&payload).map_err(|err| {
-            error!(error = %err, task_count, "Failed to serialize task payload to JSON");
-            io::Error::new(io::ErrorKind::InvalidData, format!("Failed to serialize message to JSON: {err}"))
-        })?;
-        let msg_len = msg_json.len() as MsgLen;
-        debug!(msg_len, task_count, "Sending task update to native port");
-        let msg_len_info = msg_len.to_ne_bytes();
-        self.tx.write_all(msg_len_info).await?;
-        self.tx.write_all(msg_json.into_bytes()).await?;
-        self.tx.flush().await?;
+        const HEADER_LEN: usize = size_of::<MsgLen>();
+        let mut buf = Vec::with_capacity(1024);
+        buf.extend_from_slice(&[0u8; HEADER_LEN]);
+        serde_json::to_writer(&mut buf, &payload)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+        let msg_len = (buf.len() - HEADER_LEN) as MsgLen;
+        let len_bytes = msg_len.to_ne_bytes();
+        buf[0..HEADER_LEN].copy_from_slice(&len_bytes);
+        trace!("Sending payload: {msg_len} bytes");
+        self.tx.write_all(buf).await?;
+        trace!("Payload sent successfully");
         Ok(())
     }
 }

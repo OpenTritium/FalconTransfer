@@ -68,6 +68,8 @@ impl HttpTaskMeta {
         set.insert_n_at(size, 0);
         Some(set)
     }
+
+    pub const fn size(&self) -> Option<usize> { self.size }
 }
 
 impl From<Response> for HttpTaskMeta {

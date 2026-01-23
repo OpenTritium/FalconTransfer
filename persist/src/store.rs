@@ -115,7 +115,7 @@ impl PersistStore {
             hash ^= hasher.digest();
             serde_map.insert(kb, vb);
         }
-        debug!(
+        trace!(
             content_hash = %hash,
             entry_count = serde_map.len(),
             table_name = %T::TABLE_DEF.name(),
@@ -139,14 +139,14 @@ impl PersistStore {
                     |hash_acc| {
                         let old_hash = hash_acc.value();
                         if old_hash == hash {
-                            debug!(
+                            trace!(
                                 table_name = %T::TABLE_DEF.name(),
                                 content_hash = %hash,
                                 "Content unchanged, skipping persist"
                             );
                             false
                         } else {
-                            debug!(
+                            trace!(
                                 table_name = %T::TABLE_DEF.name(),
                                 old_hash = %old_hash,
                                 new_hash = %hash,

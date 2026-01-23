@@ -40,3 +40,4 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
 typed-builder = "0.23.2"
 ubyte = { version = "0.10", features = ["serde"] }
 url = { version = "2.5.7", features = ["serde"] }
+anyhow = "1.0"

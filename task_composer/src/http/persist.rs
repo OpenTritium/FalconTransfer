@@ -71,7 +71,7 @@ impl TaskState {
             .state(state)
             .url(meta.url().clone())
             .total(total_size)
-            .err(err)
+            .err(err.map(Into::into))
             .build();
         let status = watch::Sender::new(status);
         let task =

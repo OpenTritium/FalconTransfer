@@ -35,7 +35,7 @@ use std::{
     ops::Not,
     rc::Rc,
 };
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 use typed_builder::TypedBuilder;
 
 pub type JoinResult<T> = Result<T, Box<dyn Any + Send>>;
@@ -136,11 +136,11 @@ impl TaskDispatcher {
     #[inline]
     fn broadcast_now(&mut self) {
         let Some(persist_tasks) = &mut self.persist_tasks else {
-            debug!("Persist tasks broadcast not initialized, skipping broadcast");
+            trace!("Persist tasks broadcast not initialized, skipping broadcast");
             return;
         };
         let Some(persist_pendings) = &mut self.persist_pendings else {
-            debug!("Persist pendings broadcast not initialized, skipping broadcast");
+            trace!("Persist pendings broadcast not initialized, skipping broadcast");
             return;
         };
 
@@ -304,7 +304,7 @@ impl TaskDispatcher {
                     // Update task state: remove from in-flight, add to committed
                     task.inflight -= &flushed;
                     task.committed |= &flushed;
-                    task.current_concurrency -= 1;
+                    task.current_concurrency = task.current_concurrency.saturating_sub(1);
                     // Check if task fully completed
                     if Self::check_or_set_finished(task) {
                         Self::dispose_file(&mut task.file).await;
@@ -326,7 +326,7 @@ impl TaskDispatcher {
                 warn!(task_id = %id, error = %err, "Worker failed");
                 let task = self.tasks.get_mut(&id);
                 if let Some(task) = task {
-                    task.current_concurrency -= 1;
+                    task.current_concurrency = task.current_concurrency.saturating_sub(1);
                     // Special handling: EmptyRange means no work to do, don't retry
                     if matches!(err, EmptyRange) {
                         warn!(task_id = %id, "Worker assigned empty range, marking task as failed");
@@ -437,7 +437,16 @@ impl TaskDispatcher {
             Ok(Pause(ref id)) => {
                 self.pendings.insert(*id);
                 if let Some(task) = self.tasks.get_mut(id) {
+                    use TaskStateDesc::*;
+                    let state = task.status.borrow().state;
+                    if matches!(state, Completed | Failed | Cancelled) {
+                        warn!(task_id = %id, state = %state, "Cannot pause a task in terminal state");
+                        return true;
+                    }
+
                     task.cancel.cancel();
+                    // Reset concurrency counter immediately since workers are being cancelled
+                    task.current_concurrency = 0;
                     Self::dispose_file(&mut task.file).await;
                     info!(task_id = %id, "Task paused, file handle released");
                     let _ = task.status.send_if_modified(|status| status.state.set_paused());
@@ -453,7 +462,9 @@ impl TaskDispatcher {
                 if let Some(task) = self.tasks.get_mut(id) {
                     // Reset retries to initial cached value
                     task.retries_left = self.max_retries;
-                    info!(task_id = %id, "Task resumed, retry count reset");
+                    // Create new cancellation token since the old one was cancelled during pause
+                    task.cancel = CancellationToken::new();
+                    info!(task_id = %id, "Task resumed, retry count reset, cancellation token renewed");
                     let state = task.status.borrow().state;
                     if matches!(state, Completed | Idle) {
                         warn!(task_id = %id, "Cannot resume a completed or idle task");
@@ -533,12 +544,11 @@ impl TaskDispatcher {
                     .tasks
                     .get(id)
                     .map(|task| {
-                        debug_assert!(task.file.is_none(), "File handle should be released before removal");
                         let state = task.status.borrow().state;
-                        !matches!(state, Running | Paused)
+                        matches!(state, Cancelled)
                     })
                     .unwrap_or(false);
-                // Cannot remove running or paused tasks, must cancel or wait for completion
+                // Cannot remove running tasks, must cancel or wait for completion
                 if couldbe_remove {
                     self.tasks.remove(id);
                     self.pendings.remove(id);
@@ -546,7 +556,7 @@ impl TaskDispatcher {
                     self.broadcast_now();
                     return true;
                 }
-                warn!(task_id = %id, "Cannot remove task that is running or paused");
+                warn!(task_id = %id, "Cannot remove task that is running");
             }
             // Create new task: assign unique file path, open file, spawn workers
             Ok(Create { box meta, box watch }) => {

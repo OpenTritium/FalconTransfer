@@ -1,4 +1,5 @@
 use falcon_identity::task::TaskId;
+use falcon_task_composer::TaskStatus;
 use serde::Serialize;
 use url::Url;
 
@@ -24,6 +25,27 @@ pub struct TaskInfo {
     pub url: Url,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+}
+
+impl From<TaskStatus> for TaskInfo {
+    #[inline]
+    fn from(status: TaskStatus) -> Self {
+        use falcon_task_composer::TaskStateDesc::*;
+        let TaskStatus { id, total, buffered, state, url, path, err, name, .. } = status;
+        let downloaded = buffered.len();
+        let state = match state {
+            Idle => TaskState::Idle,
+            Running => TaskState::Running { downloaded },
+            Paused => TaskState::Paused { downloaded },
+            Completed => TaskState::Completed,
+            Cancelled => TaskState::Cancelled,
+            Failed => TaskState::Failed {
+                last_error: err.as_ref().map(|err| err.to_string()).unwrap_or_else(|| "Unknown error".to_string()),
+                downloaded,
+            },
+        };
+        Self { id, name, size: total, state, url, path: path.as_ref().map(|p| p.to_string()) }
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
